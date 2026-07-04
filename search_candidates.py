@@ -17,6 +17,11 @@ from isrc_match import (
     find_video_by_isrc_search,
     is_direct_isrc_match,
 )
+from audio_similarity import (
+    ENABLE_CHROMAPRINT_MATCH,
+    ENABLE_EMBEDDING_MATCH,
+    resolve_by_audio_similarity,
+)
 
 Source = Literal["youtube_music", "youtube"]
 
@@ -174,6 +179,8 @@ class PipelineResult:
     direct_isrc_match: bool
     downloaded_path: Optional[Path]
     matched_video_id: Optional[str]
+    match_method: Optional[str]
+    audio_match_certainty: Optional[float]
     candidate_heap: list[RankedCandidate]
 
     @property
@@ -523,6 +530,8 @@ def _handle_direct_isrc_hit(
         direct_isrc_match=True,
         downloaded_path=downloaded_path,
         matched_video_id=candidate.video_id,
+        match_method="isrc",
+        audio_match_certainty=None,
         candidate_heap=[],
     )
 
@@ -542,6 +551,7 @@ def run_pipeline(
     3. Otherwise search by artist/title one-by-one (up to max_candidates).
     4. On per-candidate ISRC metadata match: download and stop.
     5. Score remaining candidates; keep rating >= threshold in a max-heap.
+    6. If enabled, run chromaprint / embedding matchers on top candidates.
     """
     save_directory = Path(save_directory)
     track = get_track_info(spotify_link)
@@ -568,6 +578,8 @@ def run_pipeline(
                 direct_isrc_match=True,
                 downloaded_path=downloaded,
                 matched_video_id=candidate.video_id,
+                match_method="isrc",
+                audio_match_certainty=None,
                 candidate_heap=[],
             )
 
@@ -576,12 +588,34 @@ def run_pipeline(
             ranked = _build_ranked_candidate(track, candidate, breakdown.total)
             _heap_push(heap, ranked)
 
+    sorted_candidates = heap_to_sorted_candidates(heap)
+
+    if sorted_candidates and (ENABLE_CHROMAPRINT_MATCH or ENABLE_EMBEDDING_MATCH):
+        audio_result = resolve_by_audio_similarity(
+            track,
+            sorted_candidates,
+            save_directory,
+            spotify_link=spotify_link,
+        )
+        if audio_result is not None and audio_result.downloaded_path is not None:
+            return PipelineResult(
+                track=track,
+                direct_isrc_match=False,
+                downloaded_path=audio_result.downloaded_path,
+                matched_video_id=audio_result.video_id,
+                match_method=audio_result.method,
+                audio_match_certainty=audio_result.certainty,
+                candidate_heap=sorted_candidates,
+            )
+
     return PipelineResult(
         track=track,
         direct_isrc_match=False,
         downloaded_path=None,
         matched_video_id=None,
-        candidate_heap=heap_to_sorted_candidates(heap),
+        match_method=None,
+        audio_match_certainty=None,
+        candidate_heap=sorted_candidates,
     )
 
 
@@ -595,8 +629,12 @@ if __name__ == "__main__":
     result = run_pipeline(sys.argv[1])
     output = {
         "direct_isrc_match": result.direct_isrc_match,
+        "match_method": result.match_method,
+        "audio_match_certainty": result.audio_match_certainty,
         "matched_video_id": result.matched_video_id,
         "downloaded_path": str(result.downloaded_path) if result.downloaded_path else None,
+        "chromaprint_enabled": ENABLE_CHROMAPRINT_MATCH,
+        "embedding_enabled": ENABLE_EMBEDDING_MATCH,
         "candidates": [
             {
                 "rating": candidate.rating,

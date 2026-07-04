@@ -95,6 +95,20 @@ def get_track_info(
     )
 
 
+def get_spotify_preview_url(
+    spotify_link: str,
+    *,
+    spotify_client: Optional[spotipy.Spotify] = None,
+) -> Optional[str]:
+    """Return the 30-second Spotify preview MP3 URL, if available."""
+    sp = spotify_client or _create_spotify_client()
+    track = sp.track(spotify_link)
+    if track is None:
+        return None
+    preview_url = track.get("preview_url")
+    return preview_url if preview_url else None
+
+
 if __name__ == "__main__":
     import sys
 
