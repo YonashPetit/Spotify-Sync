@@ -11,8 +11,12 @@ from urllib.parse import quote_plus
 import yt_dlp
 
 from download_audio import build_audio_filename, download_audio
-from get_content import TrackInfo, get_track_info, parse_spotify_track_id
-from isrc_match import extract_isrc_from_ytdlp_info, is_direct_isrc_match
+from get_content import TrackInfo, get_track_info
+from isrc_match import (
+    extract_isrc_for_video,
+    find_video_by_isrc_search,
+    is_direct_isrc_match,
+)
 
 Source = Literal["youtube_music", "youtube"]
 
@@ -32,6 +36,11 @@ _YDL_METADATA_OPTS: dict = {
     "quiet": True,
     "no_warnings": True,
     "skip_download": True,
+}
+
+_YDL_MUSIC_METADATA_OPTS: dict = {
+    **_YDL_METADATA_OPTS,
+    "extractor_args": {"youtube": {"player_client": ["web_music", "android_vr"]}},
 }
 
 
@@ -119,7 +128,10 @@ class Candidate:
 
 @dataclass
 class RankedCandidate:
-    """Heap entry: Spotify-schema metadata + match rating + YouTube video ID."""
+    """
+    Heap entry keyed by YouTube ``video_id`` for re-lookup on YouTube Music
+    or regular YouTube via ``watch_url()``.
+    """
 
     video_id: str
     rating: float
@@ -134,8 +146,15 @@ class RankedCandidate:
     source: Source
     url: str
 
+    def watch_url(self) -> str:
+        return _watch_url(self.video_id, self.source)
+
     def as_tuple(self) -> tuple:
+        """(rating, video_id, title, primary_artist, featured_artists, album,
+        duration, isrc, popularity, release_year, source, url)"""
         return (
+            self.rating,
+            self.video_id,
             self.title,
             self.primary_artist,
             self.featured_artists,
@@ -144,22 +163,24 @@ class RankedCandidate:
             self.isrc,
             self.popularity,
             self.release_year,
-            self.rating,
-            self.video_id,
+            self.source,
+            self.url,
         )
 
 
 @dataclass
 class PipelineResult:
-    spotify_track_id: str
     track: TrackInfo
     direct_isrc_match: bool
     downloaded_path: Optional[Path]
+    matched_video_id: Optional[str]
     candidate_heap: list[RankedCandidate]
 
     @property
     def best_candidate(self) -> Optional[RankedCandidate]:
-        return self.candidate_heap[0] if self.candidate_heap else None
+        if not self.candidate_heap:
+            return None
+        return self.candidate_heap[0]
 
 
 # heapq is a min-heap; negate rating for max-heap behaviour.
@@ -217,7 +238,8 @@ def _watch_url(video_id: str, source: Source) -> str:
 
 def _fetch_ytdlp_info(video_id: str, source: Source) -> dict[str, Any]:
     url = _watch_url(video_id, source)
-    with yt_dlp.YoutubeDL(_YDL_METADATA_OPTS) as ydl:
+    opts = _YDL_MUSIC_METADATA_OPTS if source == "youtube_music" else _YDL_METADATA_OPTS
+    with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
     if info is None:
         raise ValueError(f"No metadata returned for {url}")
@@ -227,13 +249,14 @@ def _fetch_ytdlp_info(video_id: str, source: Source) -> dict[str, Any]:
 def _candidate_from_info(
     video_id: str, source: Source, info: dict[str, Any]
 ) -> Candidate:
+    canonical_id = info.get("id") or video_id
     release_year = info.get("release_year")
     if release_year is None and info.get("upload_date"):
         release_year = int(str(info["upload_date"])[:4])
 
     return Candidate(
-        video_id=video_id,
-        url=_watch_url(video_id, source),
+        video_id=canonical_id,
+        url=_watch_url(canonical_id, source),
         source=source,
         title=info.get("title") or "",
         artist=info.get("artist") or info.get("creator") or "",
@@ -245,7 +268,7 @@ def _candidate_from_info(
         upload_date=info.get("upload_date") or "",
         description=info.get("description") or "",
         channel_is_verified=bool(info.get("channel_is_verified")),
-        isrc=extract_isrc_from_ytdlp_info(info),
+        isrc=extract_isrc_for_video(canonical_id, source, info),
     )
 
 
@@ -448,10 +471,26 @@ def _heap_push(heap: list[HeapEntry], ranked: RankedCandidate) -> None:
 
 
 def heap_to_sorted_candidates(heap: list[HeapEntry]) -> list[RankedCandidate]:
-    return [
-        entry[2]
-        for entry in sorted(heap, key=lambda item: (item[0], item[1]))
-    ]
+    """Return heap entries sorted by rating descending (highest first)."""
+    return sorted(
+        (entry[2] for entry in heap),
+        key=lambda candidate: (-candidate.rating, candidate.video_id),
+    )
+
+
+def _download_matched_audio(
+    track: TrackInfo,
+    candidate: Candidate,
+    *,
+    save_directory: Path,
+) -> Path:
+    _, _, _, _, _, spotify_isrc, _, _ = track
+    filename_base = build_audio_filename(spotify_isrc, candidate.video_id)
+    return download_audio(
+        candidate.url,
+        save_directory,
+        filename_base=filename_base,
+    )
 
 
 def try_direct_isrc_download(
@@ -460,18 +499,31 @@ def try_direct_isrc_download(
     *,
     save_directory: Path = SAVE_DIRECTORY,
 ) -> Optional[Path]:
-    """
-    If the candidate ISRC matches Spotify, download audio and return the file path.
-    """
+    """Download when the candidate metadata ISRC matches Spotify."""
     _, _, _, _, _, spotify_isrc, _, _ = track
     if not is_direct_isrc_match(spotify_isrc, candidate.isrc):
         return None
+    return _download_matched_audio(track, candidate, save_directory=save_directory)
 
-    filename_base = build_audio_filename(spotify_isrc, candidate.video_id)
-    return download_audio(
-        candidate.url,
-        save_directory,
-        filename_base=filename_base,
+
+def _handle_direct_isrc_hit(
+    track: TrackInfo,
+    video_id: str,
+    source: Source,
+    *,
+    save_directory: Path,
+) -> PipelineResult:
+    info = _fetch_ytdlp_info(video_id, source)
+    candidate = _candidate_from_info(video_id, source, info)
+    downloaded_path = _download_matched_audio(
+        track, candidate, save_directory=save_directory
+    )
+    return PipelineResult(
+        track=track,
+        direct_isrc_match=True,
+        downloaded_path=downloaded_path,
+        matched_video_id=candidate.video_id,
+        candidate_heap=[],
     )
 
 
@@ -485,15 +537,23 @@ def run_pipeline(
 ) -> PipelineResult:
     """
     Full search pipeline:
-    1. Load Spotify metadata (+ track ID for re-lookup).
-    2. Search YouTube Music one-by-one (up to max_candidates), then YouTube if empty.
-    3. On ISRC direct match: download audio immediately and stop.
-    4. Otherwise score each result; keep those >= threshold in a max-heap.
+    1. Load Spotify metadata.
+    2. Try ISRC search on YouTube Music (then YouTube) for a direct match.
+    3. Otherwise search by artist/title one-by-one (up to max_candidates).
+    4. On per-candidate ISRC metadata match: download and stop.
+    5. Score remaining candidates; keep rating >= threshold in a max-heap.
     """
     save_directory = Path(save_directory)
     track = get_track_info(spotify_link)
-    spotify_track_id = parse_spotify_track_id(spotify_link)
+    _, _, _, _, _, spotify_isrc, _, _ = track
     heap: list[HeapEntry] = []
+
+    isrc_hit = find_video_by_isrc_search(spotify_isrc)
+    if isrc_hit is not None:
+        video_id, source = isrc_hit
+        return _handle_direct_isrc_hit(
+            track, video_id, source, save_directory=save_directory
+        )
 
     for video_id, source in iter_search_video_ids(track, max_candidates):
         info = _fetch_ytdlp_info(video_id, source)
@@ -504,10 +564,10 @@ def run_pipeline(
         )
         if downloaded is not None:
             return PipelineResult(
-                spotify_track_id=spotify_track_id,
                 track=track,
                 direct_isrc_match=True,
                 downloaded_path=downloaded,
+                matched_video_id=candidate.video_id,
                 candidate_heap=[],
             )
 
@@ -517,10 +577,10 @@ def run_pipeline(
             _heap_push(heap, ranked)
 
     return PipelineResult(
-        spotify_track_id=spotify_track_id,
         track=track,
         direct_isrc_match=False,
         downloaded_path=None,
+        matched_video_id=None,
         candidate_heap=heap_to_sorted_candidates(heap),
     )
 
@@ -534,15 +594,15 @@ if __name__ == "__main__":
 
     result = run_pipeline(sys.argv[1])
     output = {
-        "spotify_track_id": result.spotify_track_id,
         "direct_isrc_match": result.direct_isrc_match,
+        "matched_video_id": result.matched_video_id,
         "downloaded_path": str(result.downloaded_path) if result.downloaded_path else None,
         "candidates": [
             {
-                "video_id": candidate.video_id,
-                "url": candidate.url,
-                "source": candidate.source,
                 "rating": candidate.rating,
+                "video_id": candidate.video_id,
+                "url": candidate.watch_url(),
+                "source": candidate.source,
                 "metadata": {
                     "title": candidate.title,
                     "primary_artist": candidate.primary_artist,
