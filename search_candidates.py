@@ -1,15 +1,25 @@
 from __future__ import annotations
 
+import heapq
+import json
 import re
 from dataclasses import dataclass, field
-from typing import Literal, Optional
+from pathlib import Path
+from typing import Any, Iterator, Literal, Optional
 from urllib.parse import quote_plus
 
 import yt_dlp
 
-from get_content import TrackInfo, get_track_info
+from download_audio import build_audio_filename, download_audio
+from get_content import TrackInfo, get_track_info, parse_spotify_track_id
+from isrc_match import extract_isrc_from_ytdlp_info, is_direct_isrc_match
 
 Source = Literal["youtube_music", "youtube"]
+
+# --- pipeline configuration ---
+THRESHOLD = 50.0
+SAVE_DIRECTORY = Path("downloads")
+MAX_CANDIDATES = 9
 
 _YDL_SEARCH_OPTS: dict = {
     "quiet": True,
@@ -27,8 +37,6 @@ _YDL_METADATA_OPTS: dict = {
 
 @dataclass(frozen=True)
 class ScoringWeights:
-    """Weights tuned for discriminating official uploads from covers and reuploads."""
-
     exact_artist_match: float = 30
     exact_title_match: float = 30
     duration_similarity: float = 20
@@ -49,11 +57,7 @@ class ScoringWeights:
             raise ValueError(f"Scoring weights must sum to 100, got {total}")
 
 
-# Artist + title dominate (60 pts) because wrong identity is the costliest error.
-# Duration is next (20) to drop edits, sped-up versions, and live cuts.
-# Official channel / album / year break ties among plausible matches.
 DEFAULT_WEIGHTS = ScoringWeights()
-DEFAULT_MIN_PASS_SCORE = 50.0
 
 
 @dataclass
@@ -110,21 +114,61 @@ class Candidate:
     upload_date: str = ""
     description: str = ""
     channel_is_verified: bool = False
+    isrc: Optional[str] = None
 
 
 @dataclass
-class ScoredCandidate:
-    candidate: Candidate
-    score: ScoreBreakdown
+class RankedCandidate:
+    """Heap entry: Spotify-schema metadata + match rating + YouTube video ID."""
+
+    video_id: str
+    rating: float
+    title: str
+    primary_artist: str
+    featured_artists: tuple[str, ...]
+    album: str
+    duration: int
+    isrc: Optional[str]
+    popularity: int
+    release_year: int
+    source: Source
+    url: str
+
+    def as_tuple(self) -> tuple:
+        return (
+            self.title,
+            self.primary_artist,
+            self.featured_artists,
+            self.album,
+            self.duration,
+            self.isrc,
+            self.popularity,
+            self.release_year,
+            self.rating,
+            self.video_id,
+        )
+
+
+@dataclass
+class PipelineResult:
+    spotify_track_id: str
+    track: TrackInfo
+    direct_isrc_match: bool
+    downloaded_path: Optional[Path]
+    candidate_heap: list[RankedCandidate]
 
     @property
-    def total_score(self) -> float:
-        return self.score.total
+    def best_candidate(self) -> Optional[RankedCandidate]:
+        return self.candidate_heap[0] if self.candidate_heap else None
+
+
+# heapq is a min-heap; negate rating for max-heap behaviour.
+HeapEntry = tuple[float, str, RankedCandidate]
 
 
 def _normalize_text(value: str) -> str:
     value = value.lower()
-    value = value.replace("'", "").replace("’", "").replace("`", "")
+    value = value.replace("'", "").replace("\u2019", "").replace("`", "")
     value = re.sub(r"\(feat\.[^)]*\)", "", value, flags=re.IGNORECASE)
     value = re.sub(r"\(ft\.[^)]*\)", "", value, flags=re.IGNORECASE)
     value = re.sub(r"\(with [^)]*\)", "", value, flags=re.IGNORECASE)
@@ -171,18 +215,25 @@ def _watch_url(video_id: str, source: Source) -> str:
     return f"https://www.youtube.com/watch?v={video_id}"
 
 
-def _fetch_candidate_metadata(video_id: str, source: Source) -> Candidate:
+def _fetch_ytdlp_info(video_id: str, source: Source) -> dict[str, Any]:
     url = _watch_url(video_id, source)
     with yt_dlp.YoutubeDL(_YDL_METADATA_OPTS) as ydl:
         info = ydl.extract_info(url, download=False)
+    if info is None:
+        raise ValueError(f"No metadata returned for {url}")
+    return info
 
+
+def _candidate_from_info(
+    video_id: str, source: Source, info: dict[str, Any]
+) -> Candidate:
     release_year = info.get("release_year")
     if release_year is None and info.get("upload_date"):
         release_year = int(str(info["upload_date"])[:4])
 
     return Candidate(
         video_id=video_id,
-        url=url,
+        url=_watch_url(video_id, source),
         source=source,
         title=info.get("title") or "",
         artist=info.get("artist") or info.get("creator") or "",
@@ -194,6 +245,7 @@ def _fetch_candidate_metadata(video_id: str, source: Source) -> Candidate:
         upload_date=info.get("upload_date") or "",
         description=info.get("description") or "",
         channel_is_verified=bool(info.get("channel_is_verified")),
+        isrc=extract_isrc_from_ytdlp_info(info),
     )
 
 
@@ -219,7 +271,11 @@ def _artist_match_ratio(track: TrackInfo, candidate: Candidate) -> float:
                 return 0.9
 
     best = max(
-        (_token_overlap(expected, actual) for expected in expected_artists for actual in candidate_artists),
+        (
+            _token_overlap(expected, actual)
+            for expected in expected_artists
+            for actual in candidate_artists
+        ),
         default=0.0,
     )
     if best >= 0.8:
@@ -291,11 +347,7 @@ def _album_similarity_ratio(expected_album: str, candidate: Candidate) -> float:
         return 1.0
 
     haystack = " ".join(
-        [
-            candidate.title,
-            candidate.description,
-            candidate.album,
-        ]
+        [candidate.title, candidate.description, candidate.album]
     )
     if normalized_album and normalized_album in _normalize_text(haystack):
         return 0.7
@@ -306,9 +358,7 @@ def _album_similarity_ratio(expected_album: str, candidate: Candidate) -> float:
     return 0.0
 
 
-def _release_year_ratio(
-    expected_year: int, candidate_year: Optional[int]
-) -> float:
+def _release_year_ratio(expected_year: int, candidate_year: Optional[int]) -> float:
     if candidate_year is None:
         return 0.0
     diff = abs(expected_year - candidate_year)
@@ -326,105 +376,185 @@ def score_candidate(
     candidate: Candidate,
     weights: ScoringWeights = DEFAULT_WEIGHTS,
 ) -> ScoreBreakdown:
-    title, primary_artist, _, album, duration, _, _, release_year = track
+    title, _, _, album, duration, _, _, release_year = track
     return ScoreBreakdown(
         artist_match=_artist_match_ratio(track, candidate),
         title_match=_title_match_ratio(title, candidate.title),
         duration_similarity=_duration_similarity_ratio(duration, candidate.duration),
         official_channel=_official_channel_ratio(track, candidate),
         album_similarity=_album_similarity_ratio(album, candidate),
-        release_year_proximity=_release_year_ratio(release_year, candidate.release_year),
+        release_year_proximity=_release_year_ratio(
+            release_year, candidate.release_year
+        ),
         weights=weights,
     )
 
 
-def _collect_raw_candidates(
+def iter_search_video_ids(
     track: TrackInfo,
-    search_limit: int,
-) -> list[tuple[str, Source]]:
+    max_count: int = MAX_CANDIDATES,
+) -> Iterator[tuple[str, Source]]:
+    """
+    Yield up to *max_count* unique video IDs, preferring YouTube Music results.
+    Falls back to regular YouTube when Music returns no matches.
+    """
     query = _build_search_query(track)
+    music_entries = _search_youtube_music(query, max_count)
+
+    if music_entries:
+        source: Source = "youtube_music"
+        entries = music_entries
+    else:
+        source = "youtube"
+        entries = _search_youtube(query, max_count)
+
     seen: set[str] = set()
-    ordered: list[tuple[str, Source]] = []
-
-    for entry in _search_youtube_music(query, search_limit):
-        video_id = entry["id"]
-        if video_id not in seen:
-            seen.add(video_id)
-            ordered.append((video_id, "youtube_music"))
-
-    if len(ordered) < 5:
-        for entry in _search_youtube(query, search_limit):
-            video_id = entry["id"]
-            if video_id not in seen:
-                seen.add(video_id)
-                ordered.append((video_id, "youtube"))
-
-    return ordered[:search_limit]
+    yielded = 0
+    for entry in entries:
+        if yielded >= max_count:
+            break
+        video_id = entry.get("id")
+        if not video_id or video_id in seen:
+            continue
+        seen.add(video_id)
+        yield video_id, source
+        yielded += 1
 
 
-def find_candidates(
+def _build_ranked_candidate(
     track: TrackInfo,
+    candidate: Candidate,
+    rating: float,
+) -> RankedCandidate:
+    _, _, _, _, _, _, popularity, spotify_release_year = track
+    return RankedCandidate(
+        video_id=candidate.video_id,
+        rating=rating,
+        title=candidate.title,
+        primary_artist=candidate.artist or candidate.channel or candidate.uploader,
+        featured_artists=(),
+        album=candidate.album,
+        duration=candidate.duration or 0,
+        isrc=candidate.isrc,
+        popularity=popularity,
+        release_year=candidate.release_year or spotify_release_year,
+        source=candidate.source,
+        url=candidate.url,
+    )
+
+
+def _heap_push(heap: list[HeapEntry], ranked: RankedCandidate) -> None:
+    heapq.heappush(heap, (-ranked.rating, ranked.video_id, ranked))
+
+
+def heap_to_sorted_candidates(heap: list[HeapEntry]) -> list[RankedCandidate]:
+    return [
+        entry[2]
+        for entry in sorted(heap, key=lambda item: (item[0], item[1]))
+    ]
+
+
+def try_direct_isrc_download(
+    track: TrackInfo,
+    candidate: Candidate,
     *,
-    min_candidates: int = 5,
-    max_candidates: int = 10,
-    min_pass_score: float = DEFAULT_MIN_PASS_SCORE,
-    weights: ScoringWeights = DEFAULT_WEIGHTS,
-) -> list[ScoredCandidate]:
+    save_directory: Path = SAVE_DIRECTORY,
+) -> Optional[Path]:
     """
-    Search YouTube Music first, then YouTube, score against Spotify metadata,
-    and drop candidates below min_pass_score.
+    If the candidate ISRC matches Spotify, download audio and return the file path.
     """
-    if min_candidates > max_candidates:
-        raise ValueError("min_candidates cannot exceed max_candidates")
+    _, _, _, _, _, spotify_isrc, _, _ = track
+    if not is_direct_isrc_match(spotify_isrc, candidate.isrc):
+        return None
 
-    raw_candidates = _collect_raw_candidates(track, search_limit=max_candidates + 2)
-    scored: list[ScoredCandidate] = []
-
-    for video_id, source in raw_candidates:
-        candidate = _fetch_candidate_metadata(video_id, source)
-        breakdown = score_candidate(track, candidate, weights=weights)
-        if breakdown.total >= min_pass_score:
-            scored.append(ScoredCandidate(candidate=candidate, score=breakdown))
-
-    scored.sort(key=lambda item: item.total_score, reverse=True)
-    finalists = scored[:max_candidates]
-
-    if len(finalists) < min_candidates:
-        raise ValueError(
-            f"Only {len(finalists)} candidates scored >= {min_pass_score}. "
-            "Try lowering min_pass_score or verify the Spotify link."
-        )
-
-    return finalists
+    filename_base = build_audio_filename(spotify_isrc, candidate.video_id)
+    return download_audio(
+        candidate.url,
+        save_directory,
+        filename_base=filename_base,
+    )
 
 
-def find_candidates_from_spotify_link(
+def run_pipeline(
     spotify_link: str,
-    **kwargs,
-) -> list[ScoredCandidate]:
+    *,
+    threshold: float = THRESHOLD,
+    save_directory: Path | str = SAVE_DIRECTORY,
+    max_candidates: int = MAX_CANDIDATES,
+    weights: ScoringWeights = DEFAULT_WEIGHTS,
+) -> PipelineResult:
+    """
+    Full search pipeline:
+    1. Load Spotify metadata (+ track ID for re-lookup).
+    2. Search YouTube Music one-by-one (up to max_candidates), then YouTube if empty.
+    3. On ISRC direct match: download audio immediately and stop.
+    4. Otherwise score each result; keep those >= threshold in a max-heap.
+    """
+    save_directory = Path(save_directory)
     track = get_track_info(spotify_link)
-    return find_candidates(track, **kwargs)
+    spotify_track_id = parse_spotify_track_id(spotify_link)
+    heap: list[HeapEntry] = []
+
+    for video_id, source in iter_search_video_ids(track, max_candidates):
+        info = _fetch_ytdlp_info(video_id, source)
+        candidate = _candidate_from_info(video_id, source, info)
+
+        downloaded = try_direct_isrc_download(
+            track, candidate, save_directory=save_directory
+        )
+        if downloaded is not None:
+            return PipelineResult(
+                spotify_track_id=spotify_track_id,
+                track=track,
+                direct_isrc_match=True,
+                downloaded_path=downloaded,
+                candidate_heap=[],
+            )
+
+        breakdown = score_candidate(track, candidate, weights=weights)
+        if breakdown.total >= threshold:
+            ranked = _build_ranked_candidate(track, candidate, breakdown.total)
+            _heap_push(heap, ranked)
+
+    return PipelineResult(
+        spotify_track_id=spotify_track_id,
+        track=track,
+        direct_isrc_match=False,
+        downloaded_path=None,
+        candidate_heap=heap_to_sorted_candidates(heap),
+    )
 
 
 if __name__ == "__main__":
-    import json
     import sys
 
     if len(sys.argv) < 2:
-        print(f"Usage: python {sys.argv[0]} <spotify_track_url> [min_pass_score]")
+        print(f"Usage: python {sys.argv[0]} <spotify_track_url>")
         raise SystemExit(1)
 
-    min_score = float(sys.argv[2]) if len(sys.argv) > 2 else DEFAULT_MIN_PASS_SCORE
-    results = find_candidates_from_spotify_link(sys.argv[1], min_pass_score=min_score)
-
-    for index, result in enumerate(results, start=1):
-        payload = {
-            "rank": index,
-            "url": result.candidate.url,
-            "source": result.candidate.source,
-            "title": result.candidate.title,
-            "artist": result.candidate.artist or result.candidate.channel,
-            "duration": result.candidate.duration,
-            "score": result.score.as_dict(),
-        }
-        print(json.dumps(payload, indent=2))
+    result = run_pipeline(sys.argv[1])
+    output = {
+        "spotify_track_id": result.spotify_track_id,
+        "direct_isrc_match": result.direct_isrc_match,
+        "downloaded_path": str(result.downloaded_path) if result.downloaded_path else None,
+        "candidates": [
+            {
+                "video_id": candidate.video_id,
+                "url": candidate.url,
+                "source": candidate.source,
+                "rating": candidate.rating,
+                "metadata": {
+                    "title": candidate.title,
+                    "primary_artist": candidate.primary_artist,
+                    "featured_artists": list(candidate.featured_artists),
+                    "album": candidate.album,
+                    "duration": candidate.duration,
+                    "isrc": candidate.isrc,
+                    "popularity": candidate.popularity,
+                    "release_year": candidate.release_year,
+                },
+            }
+            for candidate in result.candidate_heap
+        ],
+    }
+    print(json.dumps(output, indent=2))

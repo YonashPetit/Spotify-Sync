@@ -17,6 +17,19 @@ TrackInfo = tuple[
 ]
 
 
+_SPOTIFY_TRACK_ID_RE = re.compile(
+    r"(?:spotify:track:|open\.spotify\.com/track/)([A-Za-z0-9]+)"
+)
+
+
+def parse_spotify_track_id(spotify_link: str) -> str:
+    """Extract the Spotify track ID from a URL or URI."""
+    match = _SPOTIFY_TRACK_ID_RE.search(spotify_link)
+    if not match:
+        raise ValueError(f"Could not parse Spotify track ID from: {spotify_link!r}")
+    return match.group(1)
+
+
 def _create_spotify_client() -> spotipy.Spotify:
     client_id = os.environ.get("SPOTIPY_CLIENT_ID")
     client_secret = os.environ.get("SPOTIPY_CLIENT_SECRET")
