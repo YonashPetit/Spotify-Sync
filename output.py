@@ -45,7 +45,7 @@ def emit_error(command: str, code: str, message: str) -> None:
 def print_human(message: str) -> None:
     """Human-readable log line: stdout normally, stderr in JSON mode."""
     stream = sys.stderr if JSON_MODE else sys.stdout
-    print(message, file=stream)
+    print(message, file=stream, flush=True)
 
 
 def prompt_duplicate_choice() -> DuplicatePolicy:

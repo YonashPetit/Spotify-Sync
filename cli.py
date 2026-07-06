@@ -131,6 +131,25 @@ def _resolve_track_identity(args: argparse.Namespace) -> tuple[TrackIdentity, Op
 # command handlers (each returns the JSON `data` dict)
 
 
+def cmd_login(args: argparse.Namespace) -> dict:
+    import spotify_auth
+
+    print_human(
+        "Opening your browser for Spotify authorization. Make sure "
+        f"{spotify_auth.redirect_uri()} is registered as a Redirect URI in "
+        "your Spotify app settings (developer.spotify.com/dashboard)."
+    )
+    client = spotify_auth.login_interactive()
+    me = client.me()
+    print_human(f"Logged in as {me.get('display_name') or me['id']}.")
+    return {
+        "authenticated": True,
+        "user": {"id": me["id"], "display_name": me.get("display_name")},
+        "scopes": spotify_auth.OAUTH_SCOPES,
+        "token_cache": str(spotify_auth.token_cache_path()),
+    }
+
+
 def cmd_set_download_path(args: argparse.Namespace) -> dict:
     path = Path(args.path).expanduser()
     existing = libraries.find_library_by_path(str(path))
@@ -428,6 +447,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    subparsers.add_parser(
+        "login", help="Authorize Spotify user access (needed for playlists)."
+    )
+
     p = subparsers.add_parser("set-download-path", help="Register a library directory.")
     p.add_argument("--path", required=True)
     p.add_argument("--name")
@@ -480,6 +503,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def dispatch(args: argparse.Namespace, json_mode: bool) -> dict:
+    if args.command == "login":
+        return cmd_login(args)
     if args.command == "set-download-path":
         return cmd_set_download_path(args)
     if args.command == "select-download-path":
@@ -512,6 +537,26 @@ def _map_exception(exc: Exception) -> CliError:
         return CliError("PLAYLIST_INDEX_OUT_OF_RANGE", str(exc))
     if isinstance(exc, EnvironmentError) and "SPOTIPY" in str(exc):
         return CliError("SPOTIFY_AUTH_MISSING", str(exc))
+    try:
+        from spotify_auth import SpotifyUserAuthRequired
+
+        if isinstance(exc, SpotifyUserAuthRequired):
+            return CliError("SPOTIFY_AUTH_MISSING", str(exc))
+    except ImportError:
+        pass
+    try:
+        from spotipy.exceptions import SpotifyException
+
+        if isinstance(exc, SpotifyException):
+            if exc.http_status in (401, 403):
+                return CliError(
+                    "SPOTIFY_AUTH_MISSING",
+                    f"{exc} -- if this is a playlist command, "
+                    "run 'spotify-sync login' first.",
+                )
+            return CliError("TRACK_NOT_FOUND", str(exc), EXIT_EXTERNAL)
+    except ImportError:
+        pass
     if isinstance(exc, DownloadError):
         return CliError("DOWNLOAD_FAILED", str(exc), EXIT_EXTERNAL)
     try:

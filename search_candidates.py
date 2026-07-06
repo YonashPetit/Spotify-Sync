@@ -573,12 +573,21 @@ def run_pipeline(
     isrc_hit = find_video_by_isrc_search(spotify_isrc)
     if isrc_hit is not None:
         video_id, source = isrc_hit
-        return _handle_direct_isrc_hit(
-            track, video_id, source, save_directory=save_directory
-        )
+        try:
+            return _handle_direct_isrc_hit(
+                track, video_id, source, save_directory=save_directory
+            )
+        except Exception:
+            # ISRC search can surface unavailable/region-locked videos;
+            # fall through to the regular candidate search.
+            pass
 
     for video_id, source in iter_search_video_ids(track, max_candidates):
-        info = _fetch_ytdlp_info(video_id, source)
+        try:
+            info = _fetch_ytdlp_info(video_id, source)
+        except Exception:
+            # Skip unavailable / non-video entries (e.g. channels in results).
+            continue
         candidate = _candidate_from_info(video_id, source, info)
 
         downloaded = try_direct_isrc_download(
