@@ -27,6 +27,16 @@ def effective_window(duration_seconds: float, window_seconds: float) -> float:
 
 
 def _require_ffmpeg() -> str:
+    from download_audio import find_ffmpeg_location
+
+    location = find_ffmpeg_location()
+    if location:
+        candidate = Path(location) / (
+            "ffmpeg.exe" if (Path(location) / "ffmpeg.exe").exists() else "ffmpeg"
+        )
+        if candidate.exists():
+            return str(candidate)
+
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         raise EnvironmentError(

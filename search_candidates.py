@@ -543,6 +543,8 @@ def run_pipeline(
     save_directory: Path | str = SAVE_DIRECTORY,
     max_candidates: int = MAX_CANDIDATES,
     weights: ScoringWeights = DEFAULT_WEIGHTS,
+    enable_chromaprint: Optional[bool] = None,
+    enable_embedding: Optional[bool] = None,
 ) -> PipelineResult:
     """
     Full search pipeline:
@@ -552,7 +554,17 @@ def run_pipeline(
     4. On per-candidate ISRC metadata match: download and stop.
     5. Score remaining candidates; keep rating >= threshold in a max-heap.
     6. If enabled, run chromaprint / embedding matchers on top candidates.
+    7. If audio matching is disabled (or finds nothing), download the heap top.
+
+    ``enable_chromaprint`` / ``enable_embedding`` default to the module
+    constants in ``audio_similarity`` when left as None.
     """
+    use_chromaprint = (
+        ENABLE_CHROMAPRINT_MATCH if enable_chromaprint is None else enable_chromaprint
+    )
+    use_embedding = (
+        ENABLE_EMBEDDING_MATCH if enable_embedding is None else enable_embedding
+    )
     save_directory = Path(save_directory)
     track = get_track_info(spotify_link)
     _, _, _, _, _, spotify_isrc, _, _ = track
@@ -590,12 +602,14 @@ def run_pipeline(
 
     sorted_candidates = heap_to_sorted_candidates(heap)
 
-    if sorted_candidates and (ENABLE_CHROMAPRINT_MATCH or ENABLE_EMBEDDING_MATCH):
+    if sorted_candidates and (use_chromaprint or use_embedding):
         audio_result = resolve_by_audio_similarity(
             track,
             sorted_candidates,
             save_directory,
             spotify_link=spotify_link,
+            enable_chromaprint=use_chromaprint,
+            enable_embedding=use_embedding,
         )
         if audio_result is not None and audio_result.downloaded_path is not None:
             return PipelineResult(
@@ -607,6 +621,26 @@ def run_pipeline(
                 audio_match_certainty=audio_result.certainty,
                 candidate_heap=sorted_candidates,
             )
+
+    if sorted_candidates and not use_chromaprint and not use_embedding:
+        # Audio matching fully disabled: trust the metadata ranking and
+        # download the top-rated heap candidate.
+        top = sorted_candidates[0]
+        filename_base = build_audio_filename(spotify_isrc, top.video_id)
+        downloaded_path = download_audio(
+            top.watch_url(),
+            save_directory,
+            filename_base=filename_base,
+        )
+        return PipelineResult(
+            track=track,
+            direct_isrc_match=False,
+            downloaded_path=downloaded_path,
+            matched_video_id=top.video_id,
+            match_method="heap_top",
+            audio_match_certainty=None,
+            candidate_heap=sorted_candidates,
+        )
 
     return PipelineResult(
         track=track,

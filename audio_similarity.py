@@ -306,16 +306,25 @@ def resolve_by_audio_similarity(
     save_directory: str | Path,
     *,
     spotify_link: str,
+    enable_chromaprint: Optional[bool] = None,
+    enable_embedding: Optional[bool] = None,
 ) -> Optional[AudioMatchResult]:
     """
     Run enabled audio matchers in order: chromaprint, then embedding.
 
     Each method examines up to MAX_AUDIO_MATCH_ATTEMPTS candidates and stops
     immediately when the first candidate exceeds the configured certainty.
+    ``enable_*`` args override the module constants when not None.
     """
     save_directory = Path(save_directory)
+    use_chromaprint = (
+        ENABLE_CHROMAPRINT_MATCH if enable_chromaprint is None else enable_chromaprint
+    )
+    use_embedding = (
+        ENABLE_EMBEDDING_MATCH if enable_embedding is None else enable_embedding
+    )
 
-    if ENABLE_CHROMAPRINT_MATCH:
+    if use_chromaprint:
         result = match_by_chromaprint(
             track,
             candidates,
@@ -325,7 +334,7 @@ def resolve_by_audio_similarity(
         if result is not None:
             return result
 
-    if ENABLE_EMBEDDING_MATCH:
+    if use_embedding:
         result = match_by_embedding(
             track,
             candidates,

@@ -3,10 +3,64 @@
 from __future__ import annotations
 
 import os
+import re
+import subprocess
+from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
 import yt_dlp
+
+_FFMPEG_VERSION_RE = re.compile(r"ffmpeg version (\d+)\.")
+
+
+def _ffmpeg_works(ffmpeg_path: Path) -> bool:
+    """Accept only reasonably modern builds with a matching ffprobe."""
+    ffprobe = ffmpeg_path.with_name("ffprobe" + ffmpeg_path.suffix)
+    if not ffprobe.exists():
+        return False
+    try:
+        result = subprocess.run(
+            [str(ffmpeg_path), "-version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    match = _FFMPEG_VERSION_RE.search(result.stdout or "")
+    return match is not None and int(match.group(1)) >= 4
+
+
+@lru_cache(maxsize=1)
+def find_ffmpeg_location() -> Optional[str]:
+    """
+    Locate a usable ffmpeg directory, skipping stale builds that may shadow a
+    working install on PATH. Honors SPOTIFY_SYNC_FFMPEG (dir or binary path).
+    """
+    override = os.environ.get("SPOTIFY_SYNC_FFMPEG")
+    if override:
+        override_path = Path(override)
+        return str(override_path.parent if override_path.is_file() else override_path)
+
+    exe = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        if not entry:
+            continue
+        candidate = Path(entry) / exe
+        if candidate.is_file() and _ffmpeg_works(candidate):
+            return entry
+    return None
+
+
+def _global_cookies_file() -> Optional[str]:
+    """Cookies file configured via the CLI settings store, if any."""
+    try:
+        from settings import get_cookies_file
+
+        return get_cookies_file()
+    except Exception:
+        return None
 
 
 def download_audio(
@@ -27,7 +81,9 @@ def download_audio(
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
-        "format": "bestaudio/best",
+        "noprogress": True,
+        # Prefer native m4a so ffmpeg only remuxes instead of re-encoding.
+        "format": "bestaudio[ext=m4a]/bestaudio/best",
         "outtmpl": outtmpl,
         "postprocessors": [
             {
@@ -35,8 +91,16 @@ def download_audio(
                 "preferredcodec": "m4a",
             }
         ],
+        # Older ffmpeg builds mark the native AAC encoder as experimental.
+        "postprocessor_args": {"ffmpegextractaudio": ["-strict", "-2"]},
         "keepvideo": False,
     }
+    cookies = _global_cookies_file()
+    if cookies:
+        ydl_opts["cookiefile"] = cookies
+    ffmpeg_location = find_ffmpeg_location()
+    if ffmpeg_location:
+        ydl_opts["ffmpeg_location"] = ffmpeg_location
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
