@@ -37,6 +37,12 @@ def set_selected_library_id(library_id: int) -> None:
     set_setting(SELECTED_LIBRARY_KEY, str(library_id))
 
 
+def clear_selected_library_id() -> None:
+    conn = db.get_connection()
+    conn.execute("DELETE FROM settings WHERE key = ?", (SELECTED_LIBRARY_KEY,))
+    conn.commit()
+
+
 def get_cookies_file() -> Optional[str]:
     return get_setting(COOKIES_FILE_KEY)
 

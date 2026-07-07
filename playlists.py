@@ -98,6 +98,20 @@ def list_playlists() -> list[dict]:
     return [_row_to_dict(row) for row in rows]
 
 
+def remove_playlist(playlist_id: int) -> None:
+    """Stop tracking a playlist. Does not delete downloaded files on disk."""
+    get_playlist(playlist_id)  # raises if missing
+
+    conn = db.get_connection()
+    conn.execute("DELETE FROM playlist_items WHERE playlist_id = ?", (playlist_id,))
+    conn.execute("DELETE FROM blacklist WHERE playlist_id = ?", (playlist_id,))
+    conn.execute(
+        "DELETE FROM pending_decisions WHERE playlist_id = ?", (playlist_id,)
+    )
+    conn.execute("DELETE FROM playlists WHERE id = ?", (playlist_id,))
+    conn.commit()
+
+
 def playlist_duplicate_config(playlist_id: int) -> DuplicateConfig:
     conn = db.get_connection()
     row = conn.execute(

@@ -186,6 +186,67 @@ def cmd_select_download_path(args: argparse.Namespace) -> dict:
     return {"selected_library": library}
 
 
+def _resolve_library_id(args: argparse.Namespace) -> int:
+    """Resolve --library-id, --path, or --name to a library id."""
+    provided = sum(
+        1
+        for value in (args.library_id, args.path, args.name)
+        if value is not None
+    )
+    if provided != 1:
+        raise CliError(
+            "INVALID_ARGUMENT",
+            "Provide exactly one of --library-id, --path, or --name.",
+        )
+    if args.library_id is not None:
+        libraries.get_library_row(args.library_id)
+        return args.library_id
+    if args.path:
+        library_id = libraries.find_library_by_path(args.path)
+        if library_id is None:
+            raise CliError(
+                "LIBRARY_NOT_FOUND",
+                f"No library registered at path {args.path!r}.",
+            )
+        return library_id
+    library_id = libraries.find_library_by_name(args.name)
+    if library_id is None:
+        raise CliError("LIBRARY_NOT_FOUND", f"No library named {args.name!r}.")
+    return library_id
+
+
+def cmd_delete_download_path(args: argparse.Namespace) -> dict:
+    library_id = _resolve_library_id(args)
+    library = _library_dict(library_id)
+    result = libraries.delete_library(library_id)
+    if result["was_selected"]:
+        print_human(
+            f"Removed library {library['name'] or library['path']} (id={library_id}). "
+            "It was the selected library; selection cleared."
+        )
+    else:
+        print_human(
+            f"Removed library {library['name'] or library['path']} (id={library_id})."
+        )
+    if result["playlists_removed"]:
+        print_human(
+            f"Stopped tracking {result['playlists_removed']} playlist(s) "
+            "for this library."
+        )
+    return {"library": library, **result}
+
+
+def cmd_remove_playlist(args: argparse.Namespace) -> dict:
+    playlist = playlists_mod.get_playlist(args.playlist_id)
+    playlists_mod.remove_playlist(args.playlist_id)
+    print_human(
+        f"Stopped tracking {playlist['source']} playlist "
+        f"{playlist['name']!r} (id={args.playlist_id}). "
+        "Downloaded files were not deleted."
+    )
+    return {"playlist": playlist, "removed": True}
+
+
 def cmd_set_cookies(args: argparse.Namespace) -> dict:
     cookies_path = Path(args.cookies_file).expanduser()
     if not cookies_path.is_file():
@@ -221,17 +282,20 @@ def cmd_add_playlist(args: argparse.Namespace) -> dict:
         name=meta["name"],
     )
     directory = libraries.playlist_dir(library_id, meta["name"], meta["external_id"])
+    folder_existed = directory.is_dir()
     directory.mkdir(parents=True, exist_ok=True)
 
     playlist = playlists_mod.get_playlist(playlist_id)
+    folder_note = "using existing folder" if folder_existed else "created folder"
     print_human(
         f"{'Added' if created else 'Already tracking'} {source} playlist "
-        f"{meta['name']!r} (id={playlist_id}) -> {directory}"
+        f"{meta['name']!r} (id={playlist_id}) -> {directory} ({folder_note})"
     )
     return {
         "playlist": playlist,
         "playlist_directory": str(directory),
         "created": created,
+        "folder_existed": folder_existed,
     }
 
 
@@ -459,6 +523,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--path")
     p.add_argument("--name")
 
+    p = subparsers.add_parser(
+        "delete-download-path", help="Remove a registered library directory."
+    )
+    p.add_argument("--library-id", type=int)
+    p.add_argument("--path")
+    p.add_argument("--name")
+
     p = subparsers.add_parser("set-cookies", help="Set the global YouTube cookies file.")
     p.add_argument("--cookies-file", required=True)
 
@@ -480,6 +551,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = subparsers.add_parser("sync", help="Sync tracked playlists.")
     p.add_argument("--playlist-id", type=int)
     p.add_argument("--all", action="store_true")
+
+    p = subparsers.add_parser(
+        "remove-playlist", help="Stop tracking a playlist (files are kept)."
+    )
+    p.add_argument("--playlist-id", type=int, required=True)
 
     p = subparsers.add_parser("blacklist-song", help="Blacklist a track.")
     p.add_argument("--spotify-track-url")
@@ -509,6 +585,8 @@ def dispatch(args: argparse.Namespace, json_mode: bool) -> dict:
         return cmd_set_download_path(args)
     if args.command == "select-download-path":
         return cmd_select_download_path(args)
+    if args.command == "delete-download-path":
+        return cmd_delete_download_path(args)
     if args.command == "set-cookies":
         return cmd_set_cookies(args)
     if args.command == "add-playlist":
@@ -517,6 +595,8 @@ def dispatch(args: argparse.Namespace, json_mode: bool) -> dict:
         return cmd_add_track(args, json_mode)
     if args.command == "sync":
         return cmd_sync(args, json_mode)
+    if args.command == "remove-playlist":
+        return cmd_remove_playlist(args)
     if args.command == "blacklist-song":
         return cmd_blacklist_song(args)
     if args.command == "list-blacklisted":
