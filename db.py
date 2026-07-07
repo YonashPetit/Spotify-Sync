@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS playlists (
   enabled INTEGER NOT NULL DEFAULT 1,
   duplicate_policy TEXT NOT NULL DEFAULT 'skip',
   check_isrc INTEGER NOT NULL DEFAULT 1,
-  check_metadata INTEGER NOT NULL DEFAULT 1,
+  check_metadata INTEGER NOT NULL DEFAULT 0,
   check_audio INTEGER NOT NULL DEFAULT 0,
   metadata_threshold REAL NOT NULL DEFAULT 90.0,
   audio_duplicate_threshold REAL NOT NULL DEFAULT 0.95,

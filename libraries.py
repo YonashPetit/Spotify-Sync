@@ -94,8 +94,4 @@ def get_library_path(library_id: int) -> Path:
 
 def playlist_dir(library_id: int, playlist_name: str, external_id: str) -> Path:
     safe_name = sanitize_dir_name(playlist_name)
-    return get_library_path(library_id) / "Playlists" / f"{safe_name} [{external_id}]"
-
-
-def all_songs_dir(library_id: int) -> Path:
-    return get_library_path(library_id) / "All Songs"
+    return get_library_path(library_id) / f"{safe_name} [{external_id}]"

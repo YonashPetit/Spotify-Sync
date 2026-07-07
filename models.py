@@ -16,13 +16,11 @@ ProcessStatus = Literal[
     "already_present",
 ]
 
-LinkMethod = Literal["symlink", "hardlink", "copy"]
-
 
 @dataclass
 class DuplicateConfig:
     check_isrc: bool = True
-    check_metadata: bool = True
+    check_metadata: bool = False
     check_audio: bool = False
     metadata_threshold: float = 90.0
     audio_duplicate_threshold: float = 0.95
@@ -68,7 +66,7 @@ class TrackIdentity:
 class DuplicateResult:
     existing_track_id: int
     existing_local_path: str
-    method: Literal["isrc", "metadata", "audio"]
+    method: Literal["isrc", "audio", "path"]
     confidence: Literal["exact", "high", "review"]
     score: Optional[float]
 
@@ -88,8 +86,6 @@ class ProcessResult:
     track_id: Optional[int]
     track: Optional[TrackIdentity]
     local_path: Optional[str]
-    all_songs_link_path: Optional[str] = None
-    all_songs_link_method: Optional[LinkMethod] = None
     duplicate: Optional[DuplicateResult] = None
     message: Optional[str] = None
     request_id: Optional[str] = None
@@ -99,8 +95,6 @@ class ProcessResult:
             "status": self.status,
             "track": self.track.as_dict(self.track_id) if self.track else None,
             "local_path": self.local_path,
-            "all_songs_link_path": self.all_songs_link_path,
-            "all_songs_link_method": self.all_songs_link_method,
             "duplicate": self.duplicate.as_dict() if self.duplicate else None,
             "message": self.message,
         }

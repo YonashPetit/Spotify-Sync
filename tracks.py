@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
-from typing import Optional
+from pathlib import Path
+from typing import Iterator, Optional
 
 import db
 from isrc_match import normalize_isrc
 from models import TrackIdentity
 from search_candidates import _normalize_text
+
+_AUDIO_EXTENSIONS = {".m4a", ".mp3", ".flac", ".opus", ".ogg", ".webm"}
+_LEGACY_ISRC_STEM_RE = re.compile(r"^([A-Z0-9]{12})(?:_|$)")
 
 
 def normalize_title(value: str) -> str:
@@ -135,3 +140,40 @@ def get_library_track_path(library_id: int, track_id: int) -> Optional[str]:
         (library_id, track_id),
     ).fetchone()
     return row["local_path"] if row else None
+
+
+def iter_audio_files(directory: Path) -> Iterator[Path]:
+    """Yield audio files directly inside *directory* (non-recursive)."""
+    if not directory.is_dir():
+        return
+    for path in directory.iterdir():
+        if path.is_file() and path.suffix.lower() in _AUDIO_EXTENSIONS:
+            yield path
+
+
+def read_file_isrc(path: Path) -> Optional[str]:
+    """Read ISRC from embedded tags, if present."""
+    try:
+        if path.suffix.lower() in (".m4a", ".mp4"):
+            from mutagen.mp4 import MP4
+
+            audio = MP4(str(path))
+            isrc_raw = audio.get("----:com.apple.iTunes:ISRC")
+            if isrc_raw:
+                value = isrc_raw[0]
+                text = value.decode() if isinstance(value, bytes) else str(value)
+                return normalize_isrc(text)
+        else:
+            import mutagen
+
+            audio = mutagen.File(str(path), easy=True)
+            if audio and audio.tags:
+                isrc_val = audio.tags.get("isrc") or audio.tags.get("ISRC")
+                if isrc_val:
+                    return normalize_isrc(isrc_val[0])
+    except Exception:
+        pass
+    match = _LEGACY_ISRC_STEM_RE.match(path.stem.upper())
+    if match:
+        return normalize_isrc(match.group(1))
+    return None

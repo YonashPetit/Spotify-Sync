@@ -12,8 +12,8 @@ import libraries
 import playlists as playlists_mod
 from blacklist import is_blacklisted
 from downloader import download_spotify_track, download_youtube_track
-from duplicates import apply_duplicate_policy, find_duplicate_in_library
-from linker import link_into_all_songs
+from duplicates import apply_duplicate_policy, find_duplicate_in_directory
+from metadata import tag_downloaded_file
 from models import DuplicateConfig, DuplicateResult, ProcessResult, TrackIdentity
 from sources import spotify_source, youtube_source
 from tracks import (
@@ -103,13 +103,17 @@ def download_track(
 ) -> Path:
     if identity.spotify_track_id:
         url = source_url or spotify_source.track_url(identity.spotify_track_id)
-        return download_spotify_track(
+        local_path = download_spotify_track(
             identity, save_directory=save_directory, spotify_url=url
         )
-    url = source_url or youtube_source.watch_url(identity.youtube_video_id)
-    return download_youtube_track(
-        identity, save_directory=save_directory, youtube_url=url
-    )
+    else:
+        url = source_url or youtube_source.watch_url(identity.youtube_video_id)
+        local_path = download_youtube_track(
+            identity, save_directory=save_directory, youtube_url=url
+        )
+
+    tag_downloaded_file(local_path, identity)
+    return local_path
 
 
 def finalize_downloaded_track(
@@ -121,21 +125,16 @@ def finalize_downloaded_track(
     playlist_id: Optional[int],
     duplicate: Optional[DuplicateResult] = None,
 ) -> ProcessResult:
-    """Record DB rows and create the All Songs link for a downloaded file."""
+    """Record DB rows for a downloaded file."""
     link_track_to_library(track_id, library_id, str(local_path))
     if playlist_id is not None:
         link_track_to_playlist(track_id, playlist_id)
 
-    link_path, link_method = link_into_all_songs(
-        local_path, libraries.all_songs_dir(library_id)
-    )
     return ProcessResult(
         status="downloaded",
         track_id=track_id,
         track=identity,
         local_path=str(local_path),
-        all_songs_link_path=str(link_path),
-        all_songs_link_method=link_method,
         duplicate=duplicate,
     )
 
@@ -161,19 +160,31 @@ def process_track_for_playlist(
             message="Track is blacklisted.",
         )
 
-    existing_path = get_library_track_path(library_id, track_id)
-    if existing_path is not None:
-        if playlist_id is not None:
-            link_track_to_playlist(track_id, playlist_id)
-        return ProcessResult(
-            status="already_present",
+    duplicate = None
+    recorded_path = get_library_track_path(library_id, track_id)
+    if recorded_path is not None:
+        recorded = Path(recorded_path)
+        if (
+            recorded.exists()
+            and recorded.parent.resolve() == save_directory.resolve()
+        ):
+            if playlist_id is not None:
+                link_track_to_playlist(track_id, playlist_id)
+            return ProcessResult(
+                status="already_present",
+                track_id=track_id,
+                track=identity,
+                local_path=str(recorded),
+                message="Track already present in target directory.",
+            )
+
+        duplicate = find_duplicate_in_directory(
+            save_directory,
+            identity,
+            config,
             track_id=track_id,
-            track=identity,
-            local_path=existing_path,
-            message="Track already present in this library.",
         )
 
-    duplicate = find_duplicate_in_library(library_id, identity, config)
     if duplicate is not None:
         action = apply_duplicate_policy(
             duplicate, config.duplicate_policy, json_mode=json_mode
@@ -185,7 +196,7 @@ def process_track_for_playlist(
                 track=identity,
                 local_path=None,
                 duplicate=duplicate,
-                message="Duplicate found in target library.",
+                message="Duplicate found in target directory.",
             )
         if action == "needs_user_choice":
             request_id = create_pending_decision(
@@ -202,7 +213,7 @@ def process_track_for_playlist(
                 track=identity,
                 local_path=None,
                 duplicate=duplicate,
-                message="Potential duplicate in target library.",
+                message="Potential duplicate in target directory.",
                 request_id=request_id,
             )
         if config.duplicate_policy == "replace":

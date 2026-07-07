@@ -1,72 +1,37 @@
-"""Directory-scoped duplicate detection (ISRC -> metadata -> audio)."""
+"""Directory-scoped duplicate detection (non-recursive folder scan)."""
 
 from __future__ import annotations
 
+import re
 import tempfile
 from pathlib import Path
 from typing import Literal, Optional
 
-import db
 from isrc_match import normalize_isrc
 from models import DuplicateConfig, DuplicatePolicy, DuplicateResult, TrackIdentity
-from search_candidates import _normalize_text, _token_overlap
+from tracks import iter_audio_files, read_file_isrc
 
-_DURATION_PREFILTER_SECONDS = 5
-
-
-def _library_rows(library_id: int) -> list:
-    conn = db.get_connection()
-    return conn.execute(
-        """
-        SELECT t.id AS track_id, t.isrc, t.title_norm, t.artist_norm,
-               t.duration_seconds, lt.local_path
-        FROM library_tracks lt
-        JOIN tracks t ON t.id = lt.track_id
-        WHERE lt.library_id = ?
-        """,
-        (library_id,),
-    ).fetchall()
+_LEGACY_ISRC_STEM_RE = re.compile(r"^([A-Z0-9]{12})(?:_|$)")
 
 
-def _title_similarity(left: str, right: str) -> float:
-    left_norm = _normalize_text(left)
-    right_norm = _normalize_text(right)
-    if not left_norm or not right_norm:
-        return 0.0
-    if left_norm == right_norm:
-        return 1.0
-    if left_norm in right_norm or right_norm in left_norm:
-        return 0.9
-    return _token_overlap(left_norm, right_norm)
+def _isrc_from_filename(path: Path) -> Optional[str]:
+    match = _LEGACY_ISRC_STEM_RE.match(path.stem.upper())
+    return normalize_isrc(match.group(1)) if match else None
 
 
-def _duration_similarity(left: int, right: int) -> float:
-    diff = abs(left - right)
-    if diff <= 2:
-        return 1.0
-    if diff <= _DURATION_PREFILTER_SECONDS:
-        return 0.8
-    return 0.0
+def _file_matches_isrc(path: Path, target_isrc: str) -> bool:
+    file_isrc = read_file_isrc(path) or _isrc_from_filename(path)
+    return bool(file_isrc and normalize_isrc(file_isrc) == target_isrc)
 
 
-def _metadata_score(identity: TrackIdentity, row) -> float:
-    """0-100 similarity score from title, artist, and duration."""
-    title_score = _title_similarity(identity.title, row["title_norm"] or "")
-    artist_score = _title_similarity(identity.artist, row["artist_norm"] or "")
-    duration_score = _duration_similarity(
-        identity.duration_seconds, row["duration_seconds"] or 0
-    )
-    return (title_score * 45 + artist_score * 45 + duration_score * 10)
+def _file_matches_youtube_id(path: Path, video_id: str) -> bool:
+    stem = path.stem
+    return stem == video_id or stem.endswith(f"_{video_id}")
 
 
 def _audio_similarity_to_existing(
     identity: TrackIdentity, existing_path: Path
 ) -> Optional[float]:
-    """
-    Chromaprint fingerprint compare between the Spotify preview middle clip
-    and the middle clip of an existing local file. Best-effort: returns None
-    when previews/tools are unavailable.
-    """
     if not identity.spotify_track_id or not existing_path.exists():
         return None
     try:
@@ -102,71 +67,66 @@ def _audio_similarity_to_existing(
         return None
 
 
-def find_duplicate_in_library(
-    library_id: int,
+def find_duplicate_in_directory(
+    directory: Path,
     identity: TrackIdentity,
     config: DuplicateConfig,
+    *,
+    track_id: int = 0,
 ) -> Optional[DuplicateResult]:
-    """Check only tracks already present in this library. Cheap checks first."""
-    rows = _library_rows(library_id)
-    if not rows:
+    """
+    Scan *directory* only (non-recursive) for an existing copy of *identity*.
+
+    Uses ISRC (tags or legacy filename), YouTube id filename patterns, and
+    optionally chromaprint. Does not use metadata scoring.
+    """
+    if not directory.is_dir():
+        return None
+
+    audio_files = list(iter_audio_files(directory))
+    if not audio_files:
         return None
 
     if config.check_isrc and identity.isrc:
         target = normalize_isrc(identity.isrc)
-        for row in rows:
-            if row["isrc"] and normalize_isrc(row["isrc"]) == target:
+        for path in audio_files:
+            if _file_matches_isrc(path, target):
                 return DuplicateResult(
-                    existing_track_id=row["track_id"],
-                    existing_local_path=row["local_path"],
+                    existing_track_id=track_id,
+                    existing_local_path=str(path),
                     method="isrc",
                     confidence="exact",
                     score=None,
                 )
 
-    duration_matches = [
-        row
-        for row in rows
-        if abs((row["duration_seconds"] or 0) - identity.duration_seconds)
-        <= _DURATION_PREFILTER_SECONDS
-    ]
-
-    if config.check_metadata:
-        best_row = None
-        best_score = 0.0
-        for row in duration_matches:
-            score = _metadata_score(identity, row)
-            if score > best_score:
-                best_score = score
-                best_row = row
-        if best_row is not None and best_score >= config.metadata_threshold:
-            return DuplicateResult(
-                existing_track_id=best_row["track_id"],
-                existing_local_path=best_row["local_path"],
-                method="metadata",
-                confidence="high",
-                score=round(best_score, 2),
-            )
+    if identity.youtube_video_id:
+        for path in audio_files:
+            if _file_matches_youtube_id(path, identity.youtube_video_id):
+                return DuplicateResult(
+                    existing_track_id=track_id,
+                    existing_local_path=str(path),
+                    method="path",
+                    confidence="exact",
+                    score=None,
+                )
 
     if config.check_audio:
-        for row in duration_matches:
-            similarity = _audio_similarity_to_existing(
-                identity, Path(row["local_path"])
-            )
+        for path in audio_files:
+            similarity = _audio_similarity_to_existing(identity, path)
             if similarity is None:
                 continue
             if similarity >= config.audio_duplicate_threshold:
                 return DuplicateResult(
-                    existing_track_id=row["track_id"],
-                    existing_local_path=row["local_path"],
+                    existing_track_id=track_id,
+                    existing_local_path=str(path),
                     method="audio",
                     confidence="high",
                     score=round(similarity, 4),
                 )
             if similarity >= config.audio_review_threshold:
                 return DuplicateResult(
-                    existing_track_id=row["track_id"],
-                    existing_local_path=row["local_path"],
+                    existing_track_id=track_id,
+                    existing_local_path=str(path),
                     method="audio",
                     confidence="review",
                     score=round(similarity, 4),
@@ -185,7 +145,6 @@ def apply_duplicate_policy(
         return "skip"
     if policy in ("replace", "keep_both"):
         return "proceed"
-    # policy == "ask"
     if json_mode:
         return "needs_user_choice"
     from output import prompt_duplicate_choice

@@ -126,9 +126,29 @@ def download_audio(
     )
 
 
-def build_audio_filename(spotify_isrc: str, video_id: str) -> str:
-    """Stable filename stem for a direct ISRC-confirmed download."""
-    return f"{normalize_filename_part(spotify_isrc)}_{video_id}"
+def build_track_filename(title: str, save_directory: Path) -> str:
+    """Filename stem from song title; ISRC lives in embedded metadata."""
+    return resolve_unique_filename(save_directory, sanitize_track_filename(title))
+
+
+def sanitize_track_filename(title: str) -> str:
+    """Make a human-readable song title safe as a Windows filename stem."""
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", title)
+    cleaned = cleaned.strip(" .")
+    return cleaned or "track"
+
+
+def resolve_unique_filename(directory: Path, stem: str) -> str:
+    """Return *stem* or ``stem (2)``, etc. if audio files already exist."""
+    directory.mkdir(parents=True, exist_ok=True)
+    if not any(directory.glob(f"{stem}.*")):
+        return stem
+    counter = 2
+    while True:
+        candidate = f"{stem} ({counter})"
+        if not any(directory.glob(f"{candidate}.*")):
+            return candidate
+        counter += 1
 
 
 def normalize_filename_part(value: str) -> str:

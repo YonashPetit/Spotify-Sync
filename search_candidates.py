@@ -10,7 +10,7 @@ from urllib.parse import quote_plus
 
 import yt_dlp
 
-from download_audio import build_audio_filename, download_audio
+from download_audio import build_track_filename, download_audio
 from get_content import TrackInfo, get_track_info
 from isrc_match import (
     extract_isrc_for_video,
@@ -491,8 +491,8 @@ def _download_matched_audio(
     *,
     save_directory: Path,
 ) -> Path:
-    _, _, _, _, _, spotify_isrc, _, _ = track
-    filename_base = build_audio_filename(spotify_isrc, candidate.video_id)
+    title, *_ = track
+    filename_base = build_track_filename(title, save_directory)
     return download_audio(
         candidate.url,
         save_directory,
@@ -635,7 +635,8 @@ def run_pipeline(
         # Audio matching fully disabled: trust the metadata ranking and
         # download the top-rated heap candidate.
         top = sorted_candidates[0]
-        filename_base = build_audio_filename(spotify_isrc, top.video_id)
+        title, *_ = track
+        filename_base = build_track_filename(title, save_directory)
         downloaded_path = download_audio(
             top.watch_url(),
             save_directory,

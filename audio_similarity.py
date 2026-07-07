@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Optional
 import numpy as np
 
 from audio_segments import prepare_candidate_middle_clip, prepare_spotify_preview_middle_clip
-from download_audio import build_audio_filename, download_audio
+from download_audio import build_track_filename, download_audio
 from get_content import get_spotify_preview_url
 
 if TYPE_CHECKING:
@@ -172,8 +172,8 @@ def _download_match(
     candidate: RankedCandidate,
     save_directory: Path,
 ) -> Path:
-    _, _, _, _, _, spotify_isrc, _, _ = track
-    filename_base = build_audio_filename(spotify_isrc, candidate.video_id)
+    title, *_ = track
+    filename_base = build_track_filename(title, save_directory)
     return download_audio(
         candidate.watch_url(),
         save_directory,
