@@ -91,10 +91,15 @@ def fetch_playlist_metadata(url: str) -> dict:
     playlist_id = parse_playlist_list_id(url)
     info = _extract_info(playlist_url(playlist_id), {"extract_flat": "in_playlist"})
     entries = info.get("entries") or []
+    thumbnails = info.get("thumbnails") or []
+    cover_url = info.get("thumbnail")
+    if not cover_url and thumbnails:
+        cover_url = thumbnails[-1].get("url")
     return {
         "external_id": playlist_id,
         "name": info.get("title") or playlist_id,
         "total_tracks": len(entries),
+        "cover_url": cover_url,
     }
 
 

@@ -147,6 +147,25 @@ def fetch_metadata_for_identity(identity: TrackIdentity) -> Optional[TrackMetada
     return None
 
 
+def save_playlist_cover(directory: Path, cover_url: Optional[str]) -> Optional[str]:
+    """
+    Save playlist artwork into a folder for OS / player display.
+
+    Uses ``folder.jpg`` or ``folder.png`` (Windows Explorer folder art).
+    Returns the saved path on success, else None.
+    """
+    if not cover_url:
+        return None
+    cover = _download_cover(cover_url)
+    if cover is None:
+        return None
+    data, image_format = cover
+    filename = "folder.jpg" if image_format == "jpeg" else "folder.png"
+    path = directory / filename
+    path.write_bytes(data)
+    return str(path)
+
+
 def _download_cover(cover_url: str) -> Optional[tuple[bytes, str]]:
     try:
         request = urllib.request.Request(cover_url, headers={"User-Agent": _USER_AGENT})

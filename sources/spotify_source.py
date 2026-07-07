@@ -87,14 +87,19 @@ def fetch_playlist_metadata(
 ) -> dict:
     playlist_id = parse_playlist_id(playlist_id_or_url)
     sp = spotify_client or _playlist_client()
-    playlist = sp.playlist(playlist_id, fields="id,name,items.total,tracks.total")
+    playlist = sp.playlist(
+        playlist_id, fields="id,name,images,items.total,tracks.total"
+    )
     total = (playlist.get("items") or {}).get("total")
     if total is None:
         total = (playlist.get("tracks") or {}).get("total", 0)
+    images = playlist.get("images") or []
+    cover_url = images[0].get("url") if images else None
     return {
         "external_id": playlist["id"],
         "name": playlist.get("name") or playlist["id"],
         "total_tracks": total or 0,
+        "cover_url": cover_url,
     }
 
 

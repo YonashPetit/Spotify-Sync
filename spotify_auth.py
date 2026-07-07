@@ -29,6 +29,21 @@ def token_cache_path() -> Path:
     return get_app_home() / "spotify_token_cache.json"
 
 
+def legacy_token_cache_paths() -> list[Path]:
+    """Spotipy's default ``.cache`` file (cwd) and other legacy locations."""
+    return [Path.cwd() / ".cache"]
+
+
+def clear_token_cache() -> list[str]:
+    """Remove cached Spotify OAuth tokens. Returns paths that were deleted."""
+    removed: list[str] = []
+    for path in (token_cache_path(), *legacy_token_cache_paths()):
+        if path.is_file():
+            path.unlink()
+            removed.append(str(path))
+    return removed
+
+
 def redirect_uri() -> str:
     return os.environ.get("SPOTIPY_REDIRECT_URI", DEFAULT_REDIRECT_URI)
 
@@ -126,16 +141,22 @@ def _acquire_auth_code(manager: SpotifyOAuth, timeout_seconds: float) -> str:
     return outcome["code"]
 
 
-def login_interactive(*, timeout_seconds: float = 300.0) -> spotipy.Spotify:
+def login_interactive(
+    *, timeout_seconds: float = 300.0, force: bool = False
+) -> tuple[spotipy.Spotify, list[str]]:
     """
-    Run the browser OAuth flow (or reuse a valid cached token) and return an
-    authenticated client. Blocks until the user approves in the browser.
+    Run the browser OAuth flow and return an authenticated client.
+
+    When ``force`` is True (e.g. re-running ``login``), any existing token
+    cache is cleared and the user must sign in again. Returns
+    ``(client, cleared_cache_paths)``.
     """
+    removed = clear_token_cache() if force else []
     manager = _oauth_manager(open_browser=False)
-    if _validated_cached_token(manager) is None:
+    if force or _validated_cached_token(manager) is None:
         code = _acquire_auth_code(manager, timeout_seconds)
         manager.get_access_token(code, as_dict=False)
-    return spotipy.Spotify(auth_manager=manager)
+    return spotipy.Spotify(auth_manager=manager), removed
 
 
 def create_user_client() -> spotipy.Spotify:

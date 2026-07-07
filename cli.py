@@ -16,6 +16,7 @@ import sync as sync_mod
 from blacklist import blacklist_track, list_blacklisted
 from downloader import DownloadError
 from libraries import LibraryNotFoundError
+from metadata import save_playlist_cover
 from models import DuplicateConfig, DuplicateResult, ProcessResult, TrackIdentity
 from output import emit_error, emit_success, print_human
 from playlists import PlaylistNotFoundError
@@ -134,12 +135,15 @@ def _resolve_track_identity(args: argparse.Namespace) -> tuple[TrackIdentity, Op
 def cmd_login(args: argparse.Namespace) -> dict:
     import spotify_auth
 
+    removed: list[str] = []
     print_human(
         "Opening your browser for Spotify authorization. Make sure "
         f"{spotify_auth.redirect_uri()} is registered as a Redirect URI in "
         "your Spotify app settings (developer.spotify.com/dashboard)."
     )
-    client = spotify_auth.login_interactive()
+    client, removed = spotify_auth.login_interactive(force=True)
+    if removed:
+        print_human("Cleared existing Spotify token cache.")
     me = client.me()
     print_human(f"Logged in as {me.get('display_name') or me['id']}.")
     return {
@@ -147,6 +151,7 @@ def cmd_login(args: argparse.Namespace) -> dict:
         "user": {"id": me["id"], "display_name": me.get("display_name")},
         "scopes": spotify_auth.OAUTH_SCOPES,
         "token_cache": str(spotify_auth.token_cache_path()),
+        "cleared_caches": removed,
     }
 
 
@@ -284,6 +289,7 @@ def cmd_add_playlist(args: argparse.Namespace) -> dict:
     directory = libraries.playlist_dir(library_id, meta["name"], meta["external_id"])
     folder_existed = directory.is_dir()
     directory.mkdir(parents=True, exist_ok=True)
+    cover_path = save_playlist_cover(directory, meta.get("cover_url"))
 
     playlist = playlists_mod.get_playlist(playlist_id)
     folder_note = "using existing folder" if folder_existed else "created folder"
@@ -291,11 +297,14 @@ def cmd_add_playlist(args: argparse.Namespace) -> dict:
         f"{'Added' if created else 'Already tracking'} {source} playlist "
         f"{meta['name']!r} (id={playlist_id}) -> {directory} ({folder_note})"
     )
+    if cover_path:
+        print_human(f"Saved playlist cover to {cover_path}.")
     return {
         "playlist": playlist,
         "playlist_directory": str(directory),
         "created": created,
         "folder_existed": folder_existed,
+        "cover_path": cover_path,
     }
 
 

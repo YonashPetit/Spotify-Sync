@@ -13,7 +13,7 @@ import playlists as playlists_mod
 from blacklist import is_blacklisted
 from downloader import download_spotify_track, download_youtube_track
 from duplicates import apply_duplicate_policy, find_duplicate_in_directory
-from metadata import tag_downloaded_file
+from metadata import save_playlist_cover, tag_downloaded_file
 from models import DuplicateConfig, DuplicateResult, ProcessResult, TrackIdentity
 from sources import spotify_source, youtube_source
 from tracks import (
@@ -26,6 +26,22 @@ from tracks import (
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _fetch_playlist_metadata(playlist: dict) -> dict:
+    if playlist["source"] == "spotify":
+        return spotify_source.fetch_playlist_metadata(playlist["external_id"])
+    return youtube_source.fetch_playlist_metadata(
+        youtube_source.playlist_url(playlist["external_id"])
+    )
+
+
+def _apply_playlist_cover(save_directory: Path, playlist: dict) -> Optional[str]:
+    try:
+        meta = _fetch_playlist_metadata(playlist)
+        return save_playlist_cover(save_directory, meta.get("cover_url"))
+    except Exception:
+        return None
 
 
 @dataclass
@@ -294,6 +310,7 @@ def sync_playlist(playlist_id: int, *, json_mode: bool = False) -> SyncReport:
         library_id, playlist["name"] or playlist["external_id"], playlist["external_id"]
     )
     save_directory.mkdir(parents=True, exist_ok=True)
+    cover_path = _apply_playlist_cover(save_directory, playlist)
 
     conn = db.get_connection()
     active_rows = conn.execute(
