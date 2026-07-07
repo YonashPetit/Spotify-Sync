@@ -18,7 +18,16 @@ from downloader import DownloadError
 from libraries import LibraryNotFoundError
 from metadata import save_playlist_cover
 from models import DuplicateConfig, DuplicateResult, ProcessResult, TrackIdentity
-from output import emit_error, emit_success, print_human
+from output import (
+    emit_error,
+    emit_success,
+    log_download_start,
+    log_operation_error,
+    log_operation_start,
+    log_operation_success,
+    log_process_result,
+    print_human,
+)
 from playlists import PlaylistNotFoundError
 from sources import spotify_source, youtube_source
 from tracks import get_or_create_track, get_track_identity
@@ -56,21 +65,10 @@ def _decision_request(result: ProcessResult, library_id: int,
 
 
 def _print_result_human(result: ProcessResult) -> None:
-    track = result.track
-    label = f"{track.artist} - {track.title}" if track else "(unknown track)"
-    line = f"[{result.status}] {label}"
-    if result.local_path:
-        line += f" -> {result.local_path}"
-    if result.duplicate:
-        line += (
-            f" (duplicate via {result.duplicate.method},"
-            f" existing: {result.duplicate.existing_local_path})"
-        )
-    if result.message:
-        line += f" | {result.message}"
-    if result.request_id:
-        line += f" | request_id={result.request_id}"
-    print_human(line)
+    """Legacy detailed line; sync/add-track now use title-based logs in output."""
+    from output import log_process_result
+
+    log_process_result(result)
 
 
 def _print_summary_human(summary: dict) -> None:
@@ -135,6 +133,7 @@ def _resolve_track_identity(args: argparse.Namespace) -> tuple[TrackIdentity, Op
 def cmd_login(args: argparse.Namespace) -> dict:
     import spotify_auth
 
+    log_operation_start("login")
     removed: list[str] = []
     print_human(
         "Opening your browser for Spotify authorization. Make sure "
@@ -146,6 +145,7 @@ def cmd_login(args: argparse.Namespace) -> dict:
         print_human("Cleared existing Spotify token cache.")
     me = client.me()
     print_human(f"Logged in as {me.get('display_name') or me['id']}.")
+    log_operation_success("login")
     return {
         "authenticated": True,
         "user": {"id": me["id"], "display_name": me.get("display_name")},
@@ -156,6 +156,7 @@ def cmd_login(args: argparse.Namespace) -> dict:
 
 
 def cmd_set_download_path(args: argparse.Namespace) -> dict:
+    log_operation_start("set-download-path")
     path = Path(args.path).expanduser()
     existing = libraries.find_library_by_path(str(path))
     library_id = libraries.get_or_create_library(str(path), name=args.name)
@@ -167,10 +168,12 @@ def cmd_set_download_path(args: argparse.Namespace) -> dict:
         f"{'Created' if created else 'Found existing'} library "
         f"{library['name'] or library['path']} (id={library_id})."
     )
+    log_operation_success("set-download-path")
     return {"library": library, "created": created}
 
 
 def cmd_select_download_path(args: argparse.Namespace) -> dict:
+    log_operation_start("select-download-path")
     if not args.path and not args.name:
         raise CliError("INVALID_ARGUMENT", "Provide --path or --name.")
     if args.path:
@@ -188,6 +191,7 @@ def cmd_select_download_path(args: argparse.Namespace) -> dict:
     settings.set_selected_library_id(library_id)
     library = _library_dict(library_id)
     print_human(f"Selected library {library['name'] or library['path']} (id={library_id}).")
+    log_operation_success("select-download-path")
     return {"selected_library": library}
 
 
@@ -221,6 +225,7 @@ def _resolve_library_id(args: argparse.Namespace) -> int:
 
 
 def cmd_delete_download_path(args: argparse.Namespace) -> dict:
+    log_operation_start("delete-download-path")
     library_id = _resolve_library_id(args)
     library = _library_dict(library_id)
     result = libraries.delete_library(library_id)
@@ -238,10 +243,12 @@ def cmd_delete_download_path(args: argparse.Namespace) -> dict:
             f"Stopped tracking {result['playlists_removed']} playlist(s) "
             "for this library."
         )
+    log_operation_success("delete-download-path")
     return {"library": library, **result}
 
 
 def cmd_remove_playlist(args: argparse.Namespace) -> dict:
+    log_operation_start("remove-playlist")
     playlist = playlists_mod.get_playlist(args.playlist_id)
     playlists_mod.remove_playlist(args.playlist_id)
     print_human(
@@ -249,10 +256,12 @@ def cmd_remove_playlist(args: argparse.Namespace) -> dict:
         f"{playlist['name']!r} (id={args.playlist_id}). "
         "Downloaded files were not deleted."
     )
+    log_operation_success("remove-playlist")
     return {"playlist": playlist, "removed": True}
 
 
 def cmd_set_cookies(args: argparse.Namespace) -> dict:
+    log_operation_start("set-cookies")
     cookies_path = Path(args.cookies_file).expanduser()
     if not cookies_path.is_file():
         raise CliError(
@@ -261,10 +270,12 @@ def cmd_set_cookies(args: argparse.Namespace) -> dict:
         )
     settings.set_cookies_file(str(cookies_path.resolve()))
     print_human(f"Cookies file set to {cookies_path.resolve()}.")
+    log_operation_success("set-cookies")
     return {"cookies_file": str(cookies_path.resolve()), "scope": "global"}
 
 
 def cmd_add_playlist(args: argparse.Namespace) -> dict:
+    log_operation_start("add-playlist")
     if bool(args.spotify_playlist_url) == bool(args.youtube_playlist_url):
         raise CliError(
             "INVALID_ARGUMENT",
@@ -299,6 +310,7 @@ def cmd_add_playlist(args: argparse.Namespace) -> dict:
     )
     if cover_path:
         print_human(f"Saved playlist cover to {cover_path}.")
+    log_operation_success("add-playlist")
     return {
         "playlist": playlist,
         "playlist_directory": str(directory),
@@ -309,6 +321,7 @@ def cmd_add_playlist(args: argparse.Namespace) -> dict:
 
 
 def cmd_add_track(args: argparse.Namespace, json_mode: bool) -> dict:
+    log_operation_start("add-track")
     identity, source_url = _resolve_track_identity(args)
 
     playlist_id: Optional[int] = None
@@ -340,7 +353,6 @@ def cmd_add_track(args: argparse.Namespace, json_mode: bool) -> dict:
         json_mode=json_mode,
         source_url=source_url,
     )
-    _print_result_human(result)
 
     data: dict = {"result": result.as_dict()}
     if result.status == "needs_user_choice":
@@ -349,10 +361,29 @@ def cmd_add_track(args: argparse.Namespace, json_mode: bool) -> dict:
         raise CliError(
             "DOWNLOAD_FAILED", result.message or "Download failed.", EXIT_EXTERNAL
         )
+    log_operation_success("add-track")
     return data
 
 
+def cmd_list_playlists(args: argparse.Namespace) -> dict:
+    log_operation_start("list-playlists")
+    playlists = playlists_mod.list_playlists()
+    if not playlists:
+        print_human("No playlists are being tracked.")
+    for playlist in playlists:
+        name = playlist["name"] or playlist["external_id"]
+        status = "enabled" if playlist["enabled"] else "disabled"
+        print_human(
+            f"[{playlist['playlist_id']}] {playlist['source']}: {name!r} "
+            f"({status}, library_id={playlist['library_id']}, "
+            f"external_id={playlist['external_id']})"
+        )
+    log_operation_success("list-playlists")
+    return {"count": len(playlists), "playlists": playlists}
+
+
 def cmd_sync(args: argparse.Namespace, json_mode: bool) -> dict:
+    log_operation_start("sync")
     if bool(args.all) == (args.playlist_id is not None):
         raise CliError("INVALID_ARGUMENT", "Provide exactly one of --playlist-id or --all.")
 
@@ -377,12 +408,15 @@ def cmd_sync(args: argparse.Namespace, json_mode: bool) -> dict:
         return data
 
     if args.playlist_id is not None:
+        playlist = playlists_mod.get_playlist(args.playlist_id)
+        playlist_name = playlist["name"] or playlist["external_id"]
+        print_human(f"Syncing playlist {playlist_name!r} (id={args.playlist_id}).")
         report = sync_mod.sync_playlist(args.playlist_id, json_mode=json_mode)
-        for result in report.results:
-            _print_result_human(result)
         _print_summary_human(report.summary)
+        log_operation_success("sync")
         return report_to_data(report)
 
+    print_human("Syncing all enabled playlists.")
     all_reports = sync_mod.sync_all(json_mode=json_mode)
     playlists_data = []
     aggregate = {
@@ -396,17 +430,19 @@ def cmd_sync(args: argparse.Namespace, json_mode: bool) -> dict:
         "already_present": 0,
     }
     for playlist_id, report in all_reports.items():
-        print_human(f"--- Playlist {playlist_id} ---")
-        for result in report.results:
-            _print_result_human(result)
+        playlist = playlists_mod.get_playlist(playlist_id)
+        playlist_name = playlist["name"] or playlist["external_id"]
+        print_human(f"Finished playlist {playlist_name!r} (id={playlist_id}).")
         _print_summary_human(report.summary)
         playlists_data.append(report_to_data(report))
         for key in aggregate:
             aggregate[key] += report.summary[key]
+    log_operation_success("sync")
     return {"playlists": playlists_data, "summary": aggregate}
 
 
 def cmd_blacklist_song(args: argparse.Namespace) -> dict:
+    log_operation_start("blacklist-song")
     if args.playlist_id is not None:
         playlists_mod.get_playlist(args.playlist_id)  # validate existence
 
@@ -423,8 +459,9 @@ def cmd_blacklist_song(args: argparse.Namespace) -> dict:
     scope = "global" if args.playlist_id is None else "playlist"
     print_human(
         f"{'Blacklisted' if created else 'Already blacklisted'} "
-        f"{identity.artist} - {identity.title} ({scope})."
+        f"{identity.title!r} ({scope})."
     )
+    log_operation_success("blacklist-song")
     return {
         "blacklist_entry": {
             "blacklist_id": blacklist_id,
@@ -439,19 +476,22 @@ def cmd_blacklist_song(args: argparse.Namespace) -> dict:
 
 
 def cmd_list_blacklisted(args: argparse.Namespace) -> dict:
+    log_operation_start("list-blacklisted")
     entries = list_blacklisted(playlist_id=args.playlist_id)
     for entry in entries:
         print_human(
-            f"[{entry['blacklist_id']}] {entry['track']['artist']} - "
-            f"{entry['track']['title']} ({entry['scope']})"
+            f"[{entry['blacklist_id']}] {entry['track']['title']!r} "
+            f"({entry['scope']})"
             + (f" reason: {entry['reason']}" if entry["reason"] else "")
         )
     if not entries:
         print_human("No blacklisted tracks.")
+    log_operation_success("list-blacklisted")
     return {"count": len(entries), "entries": entries}
 
 
 def cmd_resolve_duplicate(args: argparse.Namespace, json_mode: bool) -> dict:
+    log_operation_start("resolve-duplicate")
     pending = sync_mod.get_pending_decision(args.request_id)
     if pending is None:
         raise CliError(
@@ -478,12 +518,14 @@ def cmd_resolve_duplicate(args: argparse.Namespace, json_mode: bool) -> dict:
             duplicate=duplicate,
             message="Duplicate skipped by user decision.",
         )
-        _print_result_human(result)
+        log_process_result(result)
+        log_operation_success("resolve-duplicate")
         return {"result": result.as_dict(), "action": "skip"}
 
     if args.action == "replace":
         sync_mod._remove_existing_track(pending["library_id"], duplicate)
 
+    log_download_start(identity.title)
     try:
         local_path = sync_mod.download_track(
             identity,
@@ -502,7 +544,8 @@ def cmd_resolve_duplicate(args: argparse.Namespace, json_mode: bool) -> dict:
         duplicate=duplicate,
     )
     sync_mod.delete_pending_decision(args.request_id)
-    _print_result_human(result)
+    log_process_result(result)
+    log_operation_success("resolve-duplicate")
     return {"result": result.as_dict(), "action": args.action}
 
 
@@ -547,6 +590,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--youtube-playlist-url")
     p.add_argument("--dest")
     p.add_argument("--library")
+
+    subparsers.add_parser(
+        "list-playlists", help="List all playlists currently being tracked."
+    )
 
     p = subparsers.add_parser("add-track", help="Download a single track.")
     p.add_argument("--spotify-track-url")
@@ -600,6 +647,8 @@ def dispatch(args: argparse.Namespace, json_mode: bool) -> dict:
         return cmd_set_cookies(args)
     if args.command == "add-playlist":
         return cmd_add_playlist(args)
+    if args.command == "list-playlists":
+        return cmd_list_playlists(args)
     if args.command == "add-track":
         return cmd_add_track(args, json_mode)
     if args.command == "sync":
@@ -686,7 +735,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         if json_mode:
             emit_error(args.command, error.code, str(error))
         else:
-            print(f"Error [{error.code}]: {error}", file=sys.stderr)
+            log_operation_error(args.command, str(error))
         return error.exit_code
 
     if json_mode:

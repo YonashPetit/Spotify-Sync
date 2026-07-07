@@ -15,6 +15,11 @@ from downloader import download_spotify_track, download_youtube_track
 from duplicates import apply_duplicate_policy, find_duplicate_in_directory
 from metadata import save_playlist_cover, tag_downloaded_file
 from models import DuplicateConfig, DuplicateResult, ProcessResult, TrackIdentity
+from output import (
+    log_download_retry,
+    log_download_start,
+    log_process_result,
+)
 from sources import spotify_source, youtube_source
 from tracks import (
     get_library_track_path,
@@ -164,17 +169,22 @@ def process_track_for_playlist(
     config: DuplicateConfig,
     json_mode: bool,
     source_url: Optional[str] = None,
+    retry: bool = False,
+    log_events: bool = True,
 ) -> ProcessResult:
     track_id = get_or_create_track(identity)
 
     if is_blacklisted(track_id, playlist_id):
-        return ProcessResult(
+        result = ProcessResult(
             status="skipped_blacklisted",
             track_id=track_id,
             track=identity,
             local_path=None,
             message="Track is blacklisted.",
         )
+        if log_events:
+            log_process_result(result)
+        return result
 
     duplicate = None
     recorded_path = get_library_track_path(library_id, track_id)
@@ -186,13 +196,16 @@ def process_track_for_playlist(
         ):
             if playlist_id is not None:
                 link_track_to_playlist(track_id, playlist_id)
-            return ProcessResult(
+            result = ProcessResult(
                 status="already_present",
                 track_id=track_id,
                 track=identity,
                 local_path=str(recorded),
                 message="Track already present in target directory.",
             )
+            if log_events:
+                log_process_result(result)
+            return result
 
         duplicate = find_duplicate_in_directory(
             save_directory,
@@ -206,7 +219,7 @@ def process_track_for_playlist(
             duplicate, config.duplicate_policy, json_mode=json_mode
         )
         if action == "skip":
-            return ProcessResult(
+            result = ProcessResult(
                 status="skipped_duplicate",
                 track_id=track_id,
                 track=identity,
@@ -214,6 +227,9 @@ def process_track_for_playlist(
                 duplicate=duplicate,
                 message="Duplicate found in target directory.",
             )
+            if log_events:
+                log_process_result(result)
+            return result
         if action == "needs_user_choice":
             request_id = create_pending_decision(
                 track_id=track_id,
@@ -223,7 +239,7 @@ def process_track_for_playlist(
                 source_url=source_url,
                 duplicate=duplicate,
             )
-            return ProcessResult(
+            result = ProcessResult(
                 status="needs_user_choice",
                 track_id=track_id,
                 track=identity,
@@ -232,15 +248,24 @@ def process_track_for_playlist(
                 message="Potential duplicate in target directory.",
                 request_id=request_id,
             )
+            if log_events:
+                log_process_result(result)
+            return result
         if config.duplicate_policy == "replace":
             _remove_existing_track(library_id, duplicate)
+
+    if log_events:
+        if retry:
+            log_download_retry(identity.title)
+        else:
+            log_download_start(identity.title)
 
     try:
         local_path = download_track(
             identity, save_directory=save_directory, source_url=source_url
         )
     except Exception as exc:  # noqa: BLE001 - report failure per track
-        return ProcessResult(
+        result = ProcessResult(
             status="failed",
             track_id=track_id,
             track=identity,
@@ -248,8 +273,11 @@ def process_track_for_playlist(
             duplicate=duplicate,
             message=f"Download failed: {exc}",
         )
+        if log_events:
+            log_process_result(result)
+        return result
 
-    return finalize_downloaded_track(
+    result = finalize_downloaded_track(
         track_id=track_id,
         identity=identity,
         local_path=local_path,
@@ -257,6 +285,9 @@ def process_track_for_playlist(
         playlist_id=playlist_id,
         duplicate=duplicate,
     )
+    if log_events:
+        log_process_result(result)
+    return result
 
 
 def _remove_existing_track(library_id: int, duplicate: DuplicateResult) -> None:

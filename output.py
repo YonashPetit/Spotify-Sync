@@ -48,6 +48,83 @@ def print_human(message: str) -> None:
     print(message, file=stream, flush=True)
 
 
+def log_operation_start(operation: str) -> None:
+    print_human(f"Beginning {operation}.")
+
+
+def log_operation_success(operation: str) -> None:
+    print_human(f"Completed {operation}.")
+
+
+def log_operation_error(operation: str, reason: str) -> None:
+    print_human(f"Failed {operation} for {reason!r} reason.")
+
+
+def song_title(title: str) -> str:
+    cleaned = (title or "").strip()
+    return cleaned or "Unknown"
+
+
+def log_download_start(title: str) -> None:
+    print_human(f"Beginning download of '{song_title(title)}'.")
+
+
+def log_download_retry(title: str) -> None:
+    print_human(f"Retrying to download '{song_title(title)}' track.")
+
+
+def log_download_success(title: str) -> None:
+    print_human(f"Completed download of '{song_title(title)}'.")
+
+
+def log_download_failed(title: str, reason: str) -> None:
+    print_human(f"Failed to download '{song_title(title)}' for {reason!r} reason.")
+
+
+def log_track_skipped(title: str, reason: str) -> None:
+    print_human(f"Skipped '{song_title(title)}' ({reason}).")
+
+
+def log_process_result(result) -> None:
+    """Emit human logs for a :class:`ProcessResult` using the song title."""
+    from models import ProcessResult
+
+    if not isinstance(result, ProcessResult) or result.track is None:
+        return
+    title = result.track.title
+    if result.status == "downloaded":
+        log_download_success(title)
+        return
+    if result.status == "failed":
+        reason = result.message or "unknown error"
+        prefix = "Download failed: "
+        if reason.startswith(prefix):
+            reason = reason[len(prefix) :]
+        log_download_failed(title, reason)
+        return
+    if result.status == "already_present":
+        log_track_skipped(title, "already present")
+        return
+    if result.status == "skipped_duplicate":
+        log_track_skipped(title, "duplicate")
+        return
+    if result.status == "skipped_blacklisted":
+        log_track_skipped(title, "blacklisted")
+        return
+    if result.status == "needs_user_choice":
+        print_human(
+            f"Duplicate review needed for '{song_title(title)}' "
+            f"(request_id={result.request_id})."
+        )
+        return
+    if result.status == "cancelled":
+        print_human(
+            f"Cancelled download of '{song_title(title)}'"
+            + (f" ({result.message})" if result.message else "")
+            + "."
+        )
+
+
 def prompt_duplicate_choice() -> DuplicatePolicy:
     """Interactive duplicate prompt (human mode only)."""
     print("A potential duplicate of this track already exists in the library.")
