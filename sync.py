@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, Optional
 
 import db
 import libraries
@@ -19,14 +20,19 @@ from output import (
     log_download_retry,
     log_download_start,
     log_process_result,
+    print_human,
 )
 from sources import spotify_source, youtube_source
+from sources.spotify_source import PLAYLIST_PAGE_SIZE
 from tracks import (
     get_library_track_path,
     get_or_create_track,
     link_track_to_library,
     link_track_to_playlist,
 )
+
+# Pause briefly between songs to reduce YouTube / yt-dlp rate-limit hits.
+SYNC_SONG_DELAY_SECONDS = 1.0
 
 
 def _utc_now() -> str:
@@ -172,6 +178,48 @@ def process_track_for_playlist(
     retry: bool = False,
     log_events: bool = True,
 ) -> ProcessResult:
+    try:
+        return _process_track_for_playlist_impl(
+            playlist_id=playlist_id,
+            identity=identity,
+            save_directory=save_directory,
+            library_id=library_id,
+            config=config,
+            json_mode=json_mode,
+            source_url=source_url,
+            retry=retry,
+            log_events=log_events,
+        )
+    except Exception as exc:  # noqa: BLE001 - report failure per track
+        track_id: Optional[int] = None
+        try:
+            track_id = get_or_create_track(identity)
+        except Exception:
+            pass
+        result = ProcessResult(
+            status="failed",
+            track_id=track_id,
+            track=identity,
+            local_path=None,
+            message=f"Processing failed: {exc}",
+        )
+        if log_events:
+            log_process_result(result)
+        return result
+
+
+def _process_track_for_playlist_impl(
+    *,
+    playlist_id: Optional[int],
+    identity: TrackIdentity,
+    save_directory: Path,
+    library_id: int,
+    config: DuplicateConfig,
+    json_mode: bool,
+    source_url: Optional[str] = None,
+    retry: bool = False,
+    log_events: bool = True,
+) -> ProcessResult:
     track_id = get_or_create_track(identity)
 
     if is_blacklisted(track_id, playlist_id):
@@ -306,15 +354,50 @@ def _remove_existing_track(library_id: int, duplicate: DuplicateResult) -> None:
     conn.commit()
 
 
-def _iter_source_identities(playlist: dict):
+def _iter_source_identity_batches(
+    playlist: dict,
+    *,
+    batch_size: int = PLAYLIST_PAGE_SIZE,
+) -> Iterator[list[TrackIdentity]]:
     if playlist["source"] == "spotify":
-        yield from spotify_source.iter_playlist_track_identities(
-            playlist["external_id"]
+        yield from spotify_source.iter_playlist_track_batches(
+            playlist["external_id"],
+            batch_size=batch_size,
         )
     else:
-        yield from youtube_source.iter_playlist_video_identities(
-            playlist["external_id"]
+        yield from youtube_source.iter_playlist_video_batches(
+            youtube_source.playlist_url(playlist["external_id"]),
+            batch_size=batch_size,
         )
+
+
+def _source_url_for_identity(identity: TrackIdentity) -> Optional[str]:
+    if identity.spotify_track_id:
+        return spotify_source.track_url(identity.spotify_track_id)
+    if identity.youtube_video_id:
+        return youtube_source.watch_url(identity.youtube_video_id)
+    return None
+
+
+def _pause_between_songs() -> None:
+    if SYNC_SONG_DELAY_SECONDS > 0:
+        time.sleep(SYNC_SONG_DELAY_SECONDS)
+
+
+def _failed_sync_result(
+    identity: TrackIdentity,
+    track_id: Optional[int],
+    exc: Exception,
+) -> ProcessResult:
+    result = ProcessResult(
+        status="failed",
+        track_id=track_id,
+        track=identity,
+        local_path=None,
+        message=f"Processing failed: {exc}",
+    )
+    log_process_result(result)
+    return result
 
 
 def summarize_results(results: list[ProcessResult], total_items_seen: int) -> dict:
@@ -355,30 +438,43 @@ def sync_playlist(playlist_id: int, *, json_mode: bool = False) -> SyncReport:
     seen_track_ids: set[int] = set()
     total_items_seen = 0
 
-    for identity in _iter_source_identities(playlist):
-        total_items_seen += 1
-        track_id = get_or_create_track(identity)
-        seen_track_ids.add(track_id)
+    batch_iter = _iter_source_identity_batches(playlist)
+    while True:
+        try:
+            batch = next(batch_iter)
+        except StopIteration:
+            break
+        except Exception as exc:  # noqa: BLE001 - keep partial progress
+            print_human(
+                f"Playlist pagination stopped early: {exc}. "
+                "Completed songs are saved; re-run sync to continue."
+            )
+            break
 
-        if track_id in previously_active:
-            continue
+        for identity in batch:
+            total_items_seen += 1
+            track_id: Optional[int] = None
+            result: Optional[ProcessResult] = None
+            try:
+                track_id = get_or_create_track(identity)
+                seen_track_ids.add(track_id)
 
-        source_url = None
-        if identity.spotify_track_id:
-            source_url = spotify_source.track_url(identity.spotify_track_id)
-        elif identity.youtube_video_id:
-            source_url = youtube_source.watch_url(identity.youtube_video_id)
+                if track_id not in previously_active:
+                    result = process_track_for_playlist(
+                        playlist_id=playlist_id,
+                        identity=identity,
+                        save_directory=save_directory,
+                        library_id=library_id,
+                        config=config,
+                        json_mode=json_mode,
+                        source_url=_source_url_for_identity(identity),
+                    )
+            except Exception as exc:  # noqa: BLE001 - report failure per track
+                result = _failed_sync_result(identity, track_id, exc)
 
-        result = process_track_for_playlist(
-            playlist_id=playlist_id,
-            identity=identity,
-            save_directory=save_directory,
-            library_id=library_id,
-            config=config,
-            json_mode=json_mode,
-            source_url=source_url,
-        )
-        results.append(result)
+            if result is not None:
+                results.append(result)
+                _pause_between_songs()
 
     removed = previously_active - seen_track_ids
     if removed:
@@ -402,7 +498,14 @@ def sync_all(*, json_mode: bool = False) -> dict[int, SyncReport]:
     for playlist in playlists_mod.list_playlists():
         if not playlist["enabled"]:
             continue
-        all_results[playlist["playlist_id"]] = sync_playlist(
-            playlist["playlist_id"], json_mode=json_mode
-        )
+        playlist_id = playlist["playlist_id"]
+        try:
+            all_results[playlist_id] = sync_playlist(
+                playlist_id, json_mode=json_mode
+            )
+        except Exception as exc:  # noqa: BLE001 - continue other playlists
+            name = playlist["name"] or playlist["external_id"]
+            print_human(
+                f"Sync failed for playlist {name!r} (id={playlist_id}): {exc}"
+            )
     return all_results

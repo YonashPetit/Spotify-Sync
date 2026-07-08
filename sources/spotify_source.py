@@ -7,6 +7,8 @@ from typing import Iterator, Optional
 
 import spotipy
 
+PLAYLIST_PAGE_SIZE = 50
+
 from get_content import _create_spotify_client, get_track_info, parse_spotify_track_id
 from models import TrackIdentity
 
@@ -103,27 +105,94 @@ def fetch_playlist_metadata(
     }
 
 
+def _identities_from_items(items: list[dict]) -> list[TrackIdentity]:
+    identities: list[TrackIdentity] = []
+    for item in items:
+        identity = _identity_from_item(item)
+        if identity is not None:
+            identities.append(identity)
+    return identities
+
+
+def iter_playlist_track_batches(
+    playlist_id_or_url: str,
+    *,
+    batch_size: int = PLAYLIST_PAGE_SIZE,
+    spotify_client: Optional[spotipy.Spotify] = None,
+) -> Iterator[list[TrackIdentity]]:
+    """
+    Yield playlist tracks in API-sized pages (default 50).
+
+    Each batch is a fresh Spotify page fetch so long playlists paginate
+    reliably within a single sync run.
+    """
+    playlist_id = parse_playlist_id(playlist_id_or_url)
+    sp = spotify_client or _playlist_client()
+    try:
+        yield from _iter_playlist_batches_offset(
+            sp, playlist_id, batch_size=batch_size
+        )
+        return
+    except spotipy.exceptions.SpotifyException:
+        pass
+
+    yield from _iter_playlist_batches_next(sp, playlist_id, batch_size=batch_size)
+
+
+def _iter_playlist_batches_offset(
+    sp: spotipy.Spotify,
+    playlist_id: str,
+    *,
+    batch_size: int,
+) -> Iterator[list[TrackIdentity]]:
+    offset = 0
+    while True:
+        results = sp._get(
+            f"playlists/{playlist_id}/items",
+            limit=batch_size,
+            offset=offset,
+        )
+        items = results.get("items", [])
+        if not items:
+            break
+
+        batch = _identities_from_items(items)
+        if batch:
+            yield batch
+
+        if len(items) < batch_size or not results.get("next"):
+            break
+        offset += len(items)
+
+
+def _iter_playlist_batches_next(
+    sp: spotipy.Spotify,
+    playlist_id: str,
+    *,
+    batch_size: int,
+) -> Iterator[list[TrackIdentity]]:
+    results = sp.playlist_items(playlist_id, additional_types=("track",))
+    pending: list[TrackIdentity] = []
+    while results:
+        for identity in _identities_from_items(results.get("items", [])):
+            pending.append(identity)
+            if len(pending) >= batch_size:
+                yield pending
+                pending = []
+        results = sp.next(results) if results.get("next") else None
+    if pending:
+        yield pending
+
+
 def iter_playlist_track_identities(
     playlist_id_or_url: str,
     *,
     spotify_client: Optional[spotipy.Spotify] = None,
 ) -> Iterator[TrackIdentity]:
-    playlist_id = parse_playlist_id(playlist_id_or_url)
-    sp = spotify_client or _playlist_client()
-    try:
-        # Feb 2026 endpoint; only works for playlists the user owns or
-        # collaborates on. spotipy's playlist_items() still requests
-        # parameters the new endpoint rejects, so call it directly.
-        results = sp._get(f"playlists/{playlist_id}/items", limit=50, offset=0)
-    except spotipy.exceptions.SpotifyException:
-        # Legacy endpoint for older API apps (pre Feb 2026 restrictions).
-        results = sp.playlist_items(playlist_id, additional_types=("track",))
-    while results:
-        for item in results.get("items", []):
-            identity = _identity_from_item(item)
-            if identity is not None:
-                yield identity
-        results = sp.next(results) if results.get("next") else None
+    for batch in iter_playlist_track_batches(
+        playlist_id_or_url, spotify_client=spotify_client
+    ):
+        yield from batch
 
 
 def get_playlist_track_by_index(playlist_id_or_url: str, index: int) -> TrackIdentity:

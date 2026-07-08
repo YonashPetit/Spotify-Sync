@@ -103,21 +103,47 @@ def fetch_playlist_metadata(url: str) -> dict:
     }
 
 
-def iter_playlist_video_identities(url: str) -> Iterator[TrackIdentity]:
+PLAYLIST_PAGE_SIZE = 50
+
+
+def _identity_from_flat_entry(entry: dict[str, Any]) -> Optional[TrackIdentity]:
+    video_id = entry.get("id")
+    if not video_id:
+        return None
+    return TrackIdentity(
+        spotify_track_id=None,
+        youtube_video_id=video_id,
+        isrc=None,
+        title=entry.get("title") or "",
+        artist=entry.get("channel") or entry.get("uploader") or "",
+        duration_seconds=int(entry.get("duration") or 0),
+    )
+
+
+def iter_playlist_video_batches(
+    url: str,
+    *,
+    batch_size: int = PLAYLIST_PAGE_SIZE,
+) -> Iterator[list[TrackIdentity]]:
+    """Yield playlist videos in fixed-size batches for sync pacing."""
     playlist_id = parse_playlist_list_id(url)
     info = _extract_info(playlist_url(playlist_id), {"extract_flat": "in_playlist"})
+    pending: list[TrackIdentity] = []
     for entry in info.get("entries") or []:
-        video_id = entry.get("id")
-        if not video_id:
+        identity = _identity_from_flat_entry(entry)
+        if identity is None:
             continue
-        yield TrackIdentity(
-            spotify_track_id=None,
-            youtube_video_id=video_id,
-            isrc=None,
-            title=entry.get("title") or "",
-            artist=entry.get("channel") or entry.get("uploader") or "",
-            duration_seconds=int(entry.get("duration") or 0),
-        )
+        pending.append(identity)
+        if len(pending) >= batch_size:
+            yield pending
+            pending = []
+    if pending:
+        yield pending
+
+
+def iter_playlist_video_identities(url: str) -> Iterator[TrackIdentity]:
+    for batch in iter_playlist_video_batches(url):
+        yield from batch
 
 
 def get_playlist_video_by_index(url: str, index: int) -> TrackIdentity:
