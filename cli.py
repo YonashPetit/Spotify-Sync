@@ -12,6 +12,7 @@ import libraries
 import output
 import playlists as playlists_mod
 import settings
+import status_overview
 import sync as sync_mod
 from blacklist import blacklist_track, list_blacklisted
 from downloader import DownloadError
@@ -382,6 +383,14 @@ def cmd_list_playlists(args: argparse.Namespace) -> dict:
     return {"count": len(playlists), "playlists": playlists}
 
 
+def cmd_show_settings(args: argparse.Namespace) -> dict:
+    log_operation_start("show-settings")
+    overview = status_overview.gather_settings_overview()
+    status_overview.print_settings_overview(overview)
+    log_operation_success("show-settings")
+    return overview
+
+
 def cmd_sync(args: argparse.Namespace, json_mode: bool) -> dict:
     log_operation_start("sync")
     if bool(args.all) == (args.playlist_id is not None):
@@ -595,6 +604,11 @@ def build_parser() -> argparse.ArgumentParser:
         "list-playlists", help="List all playlists currently being tracked."
     )
 
+    subparsers.add_parser(
+        "show-settings",
+        help="Print settings, thresholds, toggles, and database stats.",
+    )
+
     p = subparsers.add_parser("add-track", help="Download a single track.")
     p.add_argument("--spotify-track-url")
     p.add_argument("--youtube-url")
@@ -649,6 +663,8 @@ def dispatch(args: argparse.Namespace, json_mode: bool) -> dict:
         return cmd_add_playlist(args)
     if args.command == "list-playlists":
         return cmd_list_playlists(args)
+    if args.command == "show-settings":
+        return cmd_show_settings(args)
     if args.command == "add-track":
         return cmd_add_track(args, json_mode)
     if args.command == "sync":
