@@ -12,6 +12,7 @@ import yt_dlp
 
 from download_audio import build_track_filename, download_audio
 from get_content import TrackInfo, get_track_info
+from matching_settings import load_matching_settings
 from isrc_match import (
     extract_isrc_for_video,
     find_video_by_isrc_search,
@@ -539,10 +540,10 @@ def _handle_direct_isrc_hit(
 def run_pipeline(
     spotify_link: str,
     *,
-    threshold: float = THRESHOLD,
+    threshold: Optional[float] = None,
     save_directory: Path | str = SAVE_DIRECTORY,
     max_candidates: int = MAX_CANDIDATES,
-    weights: ScoringWeights = DEFAULT_WEIGHTS,
+    weights: Optional[ScoringWeights] = None,
     enable_chromaprint: Optional[bool] = None,
     enable_embedding: Optional[bool] = None,
 ) -> PipelineResult:
@@ -556,14 +557,23 @@ def run_pipeline(
     6. If enabled, run chromaprint / embedding matchers on top candidates.
     7. If audio matching is disabled (or finds nothing), download the heap top.
 
-    ``enable_chromaprint`` / ``enable_embedding`` default to the module
-    constants in ``audio_similarity`` when left as None.
+    ``enable_chromaprint`` / ``enable_embedding`` default to persisted
+    comparison-phase toggles when left as None.
     """
+    global_settings = load_matching_settings()
+    if threshold is None:
+        threshold = global_settings.metadata_minimum_rating
+    if weights is None:
+        weights = global_settings.to_scoring_weights()
     use_chromaprint = (
-        ENABLE_CHROMAPRINT_MATCH if enable_chromaprint is None else enable_chromaprint
+        global_settings.comparison_chromaprint
+        if enable_chromaprint is None
+        else enable_chromaprint
     )
     use_embedding = (
-        ENABLE_EMBEDDING_MATCH if enable_embedding is None else enable_embedding
+        global_settings.comparison_embedding
+        if enable_embedding is None
+        else enable_embedding
     )
     save_directory = Path(save_directory)
     track = get_track_info(spotify_link)

@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from download_audio import build_track_filename, download_audio
+from matching_settings import load_matching_settings
 from models import TrackIdentity
 from search_candidates import run_pipeline
 from sources.youtube_source import parse_video_id, watch_url
@@ -19,8 +20,8 @@ def download_spotify_track(
     *,
     save_directory: Path,
     spotify_url: str,
-    enable_chromaprint: bool = False,
-    enable_embedding: bool = False,
+    enable_chromaprint: bool | None = None,
+    enable_embedding: bool | None = None,
 ) -> Path:
     """
     Run the full matching pipeline for a Spotify track.
@@ -29,11 +30,22 @@ def download_spotify_track(
     candidate when no ISRC hit exists; otherwise the best audio match wins,
     falling back to the heap top.
     """
+    global_settings = load_matching_settings()
+    use_chromaprint = (
+        global_settings.comparison_chromaprint
+        if enable_chromaprint is None
+        else enable_chromaprint
+    )
+    use_embedding = (
+        global_settings.comparison_embedding
+        if enable_embedding is None
+        else enable_embedding
+    )
     result = run_pipeline(
         spotify_url,
         save_directory=save_directory,
-        enable_chromaprint=enable_chromaprint,
-        enable_embedding=enable_embedding,
+        enable_chromaprint=use_chromaprint,
+        enable_embedding=use_embedding,
     )
 
     if result.downloaded_path is not None:

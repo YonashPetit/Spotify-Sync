@@ -9,6 +9,7 @@ from typing import Optional
 
 import db
 import libraries
+import matching_settings as matching_settings_mod
 import output
 import playlists as playlists_mod
 import settings
@@ -383,6 +384,121 @@ def cmd_list_playlists(args: argparse.Namespace) -> dict:
     return {"count": len(playlists), "playlists": playlists}
 
 
+def _print_matching_toggles(config: matching_settings_mod.MatchingSettings) -> None:
+    print_human(
+        "Duplicate phase: "
+        f"chromaprint={_toggle_label(config.duplicate_chromaprint)}, "
+        f"embedding={_toggle_label(config.duplicate_embedding)}"
+    )
+    print_human(
+        "Comparison phase: "
+        f"chromaprint={_toggle_label(config.comparison_chromaprint)}, "
+        f"embedding={_toggle_label(config.comparison_embedding)}"
+    )
+
+
+def _toggle_label(value: bool) -> str:
+    return "on" if value else "off"
+
+
+def _collect_toggle_updates(args: argparse.Namespace, fields: list[str]) -> dict:
+    updates: dict = {}
+    for field in fields:
+        value = getattr(args, field, None)
+        if value is not None:
+            updates[field] = matching_settings_mod.parse_toggle(value)
+    return updates
+
+
+def cmd_set_audio_matching(args: argparse.Namespace) -> dict:
+    log_operation_start("set-audio-matching")
+    updates = _collect_toggle_updates(
+        args,
+        [
+            "duplicate_chromaprint",
+            "duplicate_embedding",
+            "comparison_chromaprint",
+            "comparison_embedding",
+        ],
+    )
+    if not updates:
+        raise CliError(
+            "INVALID_ARGUMENT",
+            "Provide at least one toggle: "
+            "--duplicate-chromaprint, --duplicate-embedding, "
+            "--comparison-chromaprint, or --comparison-embedding (on/off).",
+        )
+    try:
+        config = matching_settings_mod.update_matching_settings(**updates)
+    except ValueError as exc:
+        raise CliError("INVALID_ARGUMENT", str(exc)) from exc
+    _print_matching_toggles(config)
+    log_operation_success("set-audio-matching")
+    return {"matching_settings": config.as_dict()}
+
+
+def cmd_set_thresholds(args: argparse.Namespace) -> dict:
+    log_operation_start("set-thresholds")
+    updates: dict = {}
+    for field in (
+        "metadata_minimum_rating",
+        "audio_duplicate_threshold",
+        "audio_review_threshold",
+        "chromaprint_match_certainty",
+        "embedding_match_threshold",
+    ):
+        value = getattr(args, field, None)
+        if value is not None:
+            updates[field] = float(value)
+    if not updates:
+        raise CliError(
+            "INVALID_ARGUMENT",
+            "Provide at least one threshold flag "
+            "(e.g. --metadata-minimum-rating, --audio-duplicate-threshold).",
+        )
+    try:
+        config = matching_settings_mod.update_matching_settings(**updates)
+    except ValueError as exc:
+        raise CliError("INVALID_ARGUMENT", str(exc)) from exc
+    for key, value in updates.items():
+        print_human(f"Set {key} to {value}.")
+    log_operation_success("set-thresholds")
+    return {"matching_settings": config.as_dict(), "updated": updates}
+
+
+def cmd_set_scoring_weights(args: argparse.Namespace) -> dict:
+    log_operation_start("set-scoring-weights")
+    field_map = {
+        "artist": "weight_artist",
+        "title": "weight_title",
+        "duration": "weight_duration",
+        "official_channel": "weight_official_channel",
+        "album": "weight_album",
+        "release_year": "weight_release_year",
+    }
+    updates: dict = {}
+    for arg_name, setting_name in field_map.items():
+        value = getattr(args, arg_name, None)
+        if value is not None:
+            updates[setting_name] = float(value)
+    if not updates:
+        raise CliError(
+            "INVALID_ARGUMENT",
+            "Provide at least one weight "
+            "(--artist, --title, --duration, --official-channel, --album, --release-year). "
+            "All six weights must sum to 100 after update.",
+        )
+    try:
+        config = matching_settings_mod.update_matching_settings(**updates)
+    except ValueError as exc:
+        raise CliError("INVALID_ARGUMENT", str(exc)) from exc
+    print_human(f"Scoring weights now sum to {config.scoring_weight_total():.0f}.")
+    for key, value in updates.items():
+        print_human(f"Set {key} to {value}.")
+    log_operation_success("set-scoring-weights")
+    return {"matching_settings": config.as_dict(), "updated": updates}
+
+
 def cmd_show_settings(args: argparse.Namespace) -> dict:
     log_operation_start("show-settings")
     overview = status_overview.gather_settings_overview()
@@ -609,6 +725,40 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print settings, thresholds, toggles, and database stats.",
     )
 
+    p = subparsers.add_parser(
+        "set-audio-matching",
+        help="Toggle chromaprint/embedding for duplicate and comparison phases.",
+    )
+    p.add_argument("--duplicate-chromaprint", choices=["on", "off"])
+    p.add_argument("--duplicate-embedding", choices=["on", "off"])
+    p.add_argument("--comparison-chromaprint", choices=["on", "off"])
+    p.add_argument("--comparison-embedding", choices=["on", "off"])
+
+    p = subparsers.add_parser(
+        "set-thresholds",
+        help="Set metadata/audio similarity thresholds.",
+    )
+    p.add_argument("--metadata-minimum-rating", type=float, dest="metadata_minimum_rating")
+    p.add_argument("--audio-duplicate-threshold", type=float, dest="audio_duplicate_threshold")
+    p.add_argument("--audio-review-threshold", type=float, dest="audio_review_threshold")
+    p.add_argument(
+        "--chromaprint-match-certainty", type=float, dest="chromaprint_match_certainty"
+    )
+    p.add_argument(
+        "--embedding-match-threshold", type=float, dest="embedding_match_threshold"
+    )
+
+    p = subparsers.add_parser(
+        "set-scoring-weights",
+        help="Set metadata search scoring weights (must sum to 100).",
+    )
+    p.add_argument("--artist", type=float, dest="artist")
+    p.add_argument("--title", type=float, dest="title")
+    p.add_argument("--duration", type=float, dest="duration")
+    p.add_argument("--official-channel", type=float, dest="official_channel")
+    p.add_argument("--album", type=float, dest="album")
+    p.add_argument("--release-year", type=float, dest="release_year")
+
     p = subparsers.add_parser("add-track", help="Download a single track.")
     p.add_argument("--spotify-track-url")
     p.add_argument("--youtube-url")
@@ -665,6 +815,12 @@ def dispatch(args: argparse.Namespace, json_mode: bool) -> dict:
         return cmd_list_playlists(args)
     if args.command == "show-settings":
         return cmd_show_settings(args)
+    if args.command == "set-audio-matching":
+        return cmd_set_audio_matching(args)
+    if args.command == "set-thresholds":
+        return cmd_set_thresholds(args)
+    if args.command == "set-scoring-weights":
+        return cmd_set_scoring_weights(args)
     if args.command == "add-track":
         return cmd_add_track(args, json_mode)
     if args.command == "sync":

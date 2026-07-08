@@ -3,17 +3,17 @@
 from __future__ import annotations
 
 import os
-from dataclasses import asdict
 from typing import Any, Optional
 
 import db
 import libraries
+import matching_settings as matching_settings_mod
 import playlists as playlists_mod
 import settings
 from app_paths import get_app_home, get_db_path
 from models import DuplicateConfig
 from output import print_human
-from search_candidates import DEFAULT_WEIGHTS, MAX_CANDIDATES, THRESHOLD
+from search_candidates import MAX_CANDIDATES
 
 
 def _bool_label(value: bool) -> str:
@@ -46,8 +46,17 @@ def gather_settings_overview() -> dict[str, Any]:
     from download_audio import find_ffmpeg_location
     from spotify_auth import has_cached_token, redirect_uri, token_cache_path
 
+    global_matching = matching_settings_mod.load_matching_settings()
     default_dup = DuplicateConfig()
-    weights = asdict(DEFAULT_WEIGHTS)
+    weights = global_matching.as_dict()
+    weights_display = {
+        "exact_artist_match": global_matching.weight_artist,
+        "exact_title_match": global_matching.weight_title,
+        "duration_similarity": global_matching.weight_duration,
+        "official_channel": global_matching.weight_official_channel,
+        "album_similarity": global_matching.weight_album,
+        "release_year_proximity": global_matching.weight_release_year,
+    }
 
     selected_library_id = settings.get_selected_library_id()
     selected_library: Optional[dict] = None
@@ -92,8 +101,16 @@ def gather_settings_overview() -> dict[str, Any]:
         "duplicate_detection": {
             "description": (
                 "Folder scan before download (non-recursive). "
-                "Uses ISRC, YouTube filename patterns, and optional chromaprint."
+                "Uses ISRC, YouTube filename patterns, and optional audio matchers."
             ),
+            "audio_matching_toggles": {
+                "duplicate_chromaprint": global_matching.duplicate_chromaprint,
+                "duplicate_embedding": global_matching.duplicate_embedding,
+            },
+            "thresholds": {
+                "audio_duplicate_threshold": global_matching.audio_duplicate_threshold,
+                "audio_review_threshold": global_matching.audio_review_threshold,
+            },
             "defaults": default_dup.as_dict(),
             "notes": {
                 "check_metadata": (
@@ -103,8 +120,8 @@ def gather_settings_overview() -> dict[str, Any]:
                     "Stored per playlist but not used by directory duplicate scan."
                 ),
                 "check_audio": (
-                    "When on, compares chromaprint similarity against files "
-                    "already in the target folder."
+                    "Legacy per-playlist flag; global duplicate-phase toggles "
+                    "control chromaprint/embedding folder scans."
                 ),
                 "audio_duplicate_threshold": (
                     "Similarity >= this value is treated as a definite duplicate."
@@ -130,9 +147,9 @@ def gather_settings_overview() -> dict[str, Any]:
                 "How Spotify tracks are matched to a YouTube source before download."
             ),
             "metadata_scoring": {
-                "minimum_rating_to_consider": THRESHOLD,
+                "minimum_rating_to_consider": global_matching.metadata_minimum_rating,
                 "max_search_candidates": MAX_CANDIDATES,
-                "weights_percent": weights,
+                "weights_percent": weights_display,
                 "weight_fields": {
                     "exact_artist_match": "Artist name match",
                     "exact_title_match": "Title match",
@@ -142,24 +159,21 @@ def gather_settings_overview() -> dict[str, Any]:
                     "release_year_proximity": "Release year closeness",
                 },
             },
-            "audio_matching_module_defaults": {
-                "chromaprint_enabled": ENABLE_CHROMAPRINT_MATCH,
-                "embedding_enabled": ENABLE_EMBEDDING_MATCH,
+            "audio_matching_toggles": {
+                "comparison_chromaprint": global_matching.comparison_chromaprint,
+                "comparison_embedding": global_matching.comparison_embedding,
+            },
+            "audio_matching_thresholds": {
+                "chromaprint_match_certainty": global_matching.chromaprint_match_certainty,
+                "embedding_match_threshold": global_matching.embedding_match_threshold,
+                "max_audio_match_attempts": MAX_AUDIO_MATCH_ATTEMPTS,
                 "chromaprint_middle_seconds": CHROMAPRINT_MIDDLE_SECONDS,
                 "embedding_middle_seconds": EMBEDDING_MIDDLE_SECONDS,
-                "chromaprint_match_certainty": AUDIO_MATCH_CERTAINTY,
-                "embedding_match_threshold": EMBEDDING_MATCH_THRESHOLD,
-                "max_audio_match_attempts": MAX_AUDIO_MATCH_ATTEMPTS,
             },
-        "effective_during_sync_download": {
-            "chromaprint_enabled": False,
-            "embedding_enabled": False,
-            "note": (
-                "Sync uses metadata ranking + ISRC search by default. "
-                "Module-level chromaprint/embedding toggles apply when "
-                "those parameters are enabled for a download."
-            ),
-        },
+            "module_fallback_defaults": {
+                "chromaprint_enabled": ENABLE_CHROMAPRINT_MATCH,
+                "embedding_enabled": ENABLE_EMBEDDING_MATCH,
+            },
             "isrc_direct_match": {
                 "enabled": True,
                 "description": "Try YouTube Music / YouTube ISRC search before metadata heap.",
@@ -198,8 +212,10 @@ def print_settings_overview(data: dict[str, Any]) -> None:
     stats = data["stats"]
     defaults = dup["defaults"]
     meta = song["metadata_scoring"]
-    audio_defaults = song["audio_matching_module_defaults"]
-    audio_effective = song["effective_during_sync_download"]
+    dup_audio = dup["audio_matching_toggles"]
+    cmp_audio = song["audio_matching_toggles"]
+    audio_thresholds = song["audio_matching_thresholds"]
+    dup_thresholds = dup["thresholds"]
 
     print_human("=== Application ===")
     _line("App data directory", app["app_home"])
@@ -246,13 +262,12 @@ def print_settings_overview(data: dict[str, Any]) -> None:
 
     print_human("")
     print_human("=== Duplicate detection (folder scan) ===")
-    _line("ISRC check", _bool_label(defaults["check_isrc"]))
-    _line("Audio (chromaprint) check", _bool_label(defaults["check_audio"]))
-    _line("Metadata scoring check", _bool_label(defaults["check_metadata"]))
+    _line("Duplicate chromaprint", _bool_label(dup_audio["duplicate_chromaprint"]))
+    _line("Duplicate embedding", _bool_label(dup_audio["duplicate_embedding"]))
+    _line("ISRC check (per playlist default)", _bool_label(defaults["check_isrc"]))
     _line("Default duplicate policy", defaults["duplicate_policy"])
-    _line("Audio duplicate threshold", defaults["audio_duplicate_threshold"])
-    _line("Audio review threshold", defaults["audio_review_threshold"])
-    _line("Metadata threshold (stored)", defaults["metadata_threshold"])
+    _line("Audio duplicate threshold", dup_thresholds["audio_duplicate_threshold"])
+    _line("Audio review threshold", dup_thresholds["audio_review_threshold"])
 
     if dup["per_playlist"]:
         print_human("")
@@ -282,52 +297,32 @@ def print_settings_overview(data: dict[str, Any]) -> None:
     for field, label in meta["weight_fields"].items():
         _line(label, meta["weights_percent"][field], indent=2)
 
-    print_human("  Module defaults (when audio matching is enabled):")
-    _line(
-        "Chromaprint",
-        _bool_label(audio_defaults["chromaprint_enabled"]),
-        indent=2,
-    )
-    _line(
-        "Vector embedding",
-        _bool_label(audio_defaults["embedding_enabled"]),
-        indent=2,
-    )
+    print_human("  Comparison phase audio matching:")
+    _line("Chromaprint", _bool_label(cmp_audio["comparison_chromaprint"]), indent=2)
+    _line("Vector embedding", _bool_label(cmp_audio["comparison_embedding"]), indent=2)
     _line(
         "Chromaprint match certainty",
-        audio_defaults["chromaprint_match_certainty"],
+        audio_thresholds["chromaprint_match_certainty"],
         indent=2,
     )
     _line(
         "Embedding match threshold",
-        audio_defaults["embedding_match_threshold"],
+        audio_thresholds["embedding_match_threshold"],
         indent=2,
     )
     _line(
         "Max audio match attempts",
-        audio_defaults["max_audio_match_attempts"],
+        audio_thresholds["max_audio_match_attempts"],
         indent=2,
     )
     _line(
         "Chromaprint clip seconds",
-        audio_defaults["chromaprint_middle_seconds"],
+        audio_thresholds["chromaprint_middle_seconds"],
         indent=2,
     )
     _line(
         "Embedding clip seconds",
-        audio_defaults["embedding_middle_seconds"],
-        indent=2,
-    )
-
-    print_human("  Effective during sync download:")
-    _line(
-        "Chromaprint",
-        _bool_label(audio_effective["chromaprint_enabled"]),
-        indent=2,
-    )
-    _line(
-        "Vector embedding",
-        _bool_label(audio_effective["embedding_enabled"]),
+        audio_thresholds["embedding_middle_seconds"],
         indent=2,
     )
 

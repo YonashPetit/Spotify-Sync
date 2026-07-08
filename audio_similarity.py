@@ -14,6 +14,7 @@ import numpy as np
 from audio_segments import prepare_candidate_middle_clip, prepare_spotify_preview_middle_clip
 from download_audio import build_track_filename, download_audio
 from get_content import get_spotify_preview_url
+from matching_settings import load_matching_settings
 
 if TYPE_CHECKING:
     from get_content import TrackInfo
@@ -317,11 +318,16 @@ def resolve_by_audio_similarity(
     ``enable_*`` args override the module constants when not None.
     """
     save_directory = Path(save_directory)
+    global_settings = load_matching_settings()
     use_chromaprint = (
-        ENABLE_CHROMAPRINT_MATCH if enable_chromaprint is None else enable_chromaprint
+        global_settings.comparison_chromaprint
+        if enable_chromaprint is None
+        else enable_chromaprint
     )
     use_embedding = (
-        ENABLE_EMBEDDING_MATCH if enable_embedding is None else enable_embedding
+        global_settings.comparison_embedding
+        if enable_embedding is None
+        else enable_embedding
     )
 
     if use_chromaprint:
@@ -330,6 +336,7 @@ def resolve_by_audio_similarity(
             candidates,
             spotify_link=spotify_link,
             save_directory=save_directory,
+            certainty_threshold=global_settings.chromaprint_match_certainty,
         )
         if result is not None:
             return result
@@ -340,6 +347,7 @@ def resolve_by_audio_similarity(
             candidates,
             spotify_link=spotify_link,
             save_directory=save_directory,
+            certainty_threshold=global_settings.embedding_match_threshold,
         )
         if result is not None:
             return result
