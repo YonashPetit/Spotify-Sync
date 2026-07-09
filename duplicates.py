@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import re
-import tempfile
 from pathlib import Path
 from typing import Literal, Optional
 
+from chromaprint_engine import (
+    compare_fingerprints,
+    fingerprint_local_file,
+    fingerprint_spotify_preview,
+)
 from isrc_match import normalize_isrc
-from matching_settings import load_matching_settings
+from matching_settings import get_chromaprint_strategy, load_matching_settings
 from models import DuplicateConfig, DuplicatePolicy, DuplicateResult, TrackIdentity
 from tracks import iter_audio_files, read_file_isrc
 
@@ -36,34 +40,17 @@ def _chromaprint_similarity_to_existing(
     if not identity.spotify_track_id or not existing_path.exists():
         return None
     try:
-        from audio_segments import (
-            extract_middle_segment,
-            prepare_spotify_preview_middle_clip,
+        global_settings = load_matching_settings()
+        strategy = get_chromaprint_strategy()
+        spotify_fp = fingerprint_spotify_preview(identity.spotify_track_id)
+        local_fp = fingerprint_local_file(str(existing_path))
+        score, _matched = compare_fingerprints(
+            spotify_fp,
+            local_fp,
+            strategy=strategy,
+            threshold=global_settings.chromaprint_match_certainty,
         )
-        from audio_similarity import (
-            CHROMAPRINT_MIDDLE_SECONDS,
-            _fingerprint_similarity,
-        )
-        from get_content import get_spotify_preview_url
-
-        preview_url = get_spotify_preview_url(identity.spotify_track_id)
-        if not preview_url:
-            return None
-
-        with tempfile.TemporaryDirectory(prefix="spotify_sync_dup_") as tmp:
-            temp_dir = Path(tmp)
-            reference = prepare_spotify_preview_middle_clip(
-                preview_url,
-                window_seconds=CHROMAPRINT_MIDDLE_SECONDS,
-                output_path=temp_dir / "reference.wav",
-            )
-            existing_clip = extract_middle_segment(
-                existing_path,
-                temp_dir / "existing.wav",
-                duration_seconds=float(identity.duration_seconds),
-                window_seconds=CHROMAPRINT_MIDDLE_SECONDS,
-            )
-            return _fingerprint_similarity(reference, existing_clip)
+        return score
     except Exception:
         return None
 
@@ -74,6 +61,8 @@ def _embedding_similarity_to_existing(
     if not identity.spotify_track_id or not existing_path.exists():
         return None
     try:
+        import tempfile
+
         from audio_segments import (
             extract_middle_segment,
             prepare_spotify_preview_middle_clip,

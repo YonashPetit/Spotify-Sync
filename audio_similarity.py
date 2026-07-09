@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import os
-import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,9 +10,14 @@ from typing import TYPE_CHECKING, Optional
 import numpy as np
 
 from audio_segments import prepare_candidate_middle_clip, prepare_spotify_preview_middle_clip
+from chromaprint_engine import (
+    compare_fingerprints,
+    fingerprint_spotify_preview,
+    fingerprint_youtube_candidate,
+)
 from download_audio import build_track_filename, download_audio
 from get_content import get_spotify_preview_url
-from matching_settings import load_matching_settings
+from matching_settings import get_chromaprint_strategy, load_matching_settings
 
 if TYPE_CHECKING:
     from get_content import TrackInfo
@@ -24,8 +27,8 @@ if TYPE_CHECKING:
 ENABLE_CHROMAPRINT_MATCH = True
 ENABLE_EMBEDDING_MATCH = True
 
-# Middle segment length (seconds). Always centered on the track / preview.
-CHROMAPRINT_MIDDLE_SECONDS = 20.0  # usable range ~10–30
+# Middle segment length (seconds). Used by embedding matcher only.
+CHROMAPRINT_MIDDLE_SECONDS = 20.0  # legacy display constant
 EMBEDDING_MIDDLE_SECONDS = 20.0
 
 # Stop immediately and download when certainty >= this value (0–1).
@@ -45,107 +48,6 @@ class AudioMatchResult:
     method: str
     video_id: str
     downloaded_path: Optional[Path] = None
-
-
-def _clamp_chromaprint_window(seconds: float) -> float:
-    return max(10.0, min(30.0, seconds))
-
-
-def _normalize_text(value: str) -> str:
-    value = value.lower()
-    value = re.sub(r"[^\w\s]", " ", value)
-    return " ".join(value.split())
-
-
-def _metadata_matches_spotify(
-    track: TrackInfo,
-    result_title: str,
-    result_artist: str,
-) -> bool:
-    title, primary_artist, featured_artists, *_ = track
-    expected_title = _normalize_text(title)
-    expected_artists = [_normalize_text(primary_artist)]
-    expected_artists.extend(_normalize_text(a) for a in featured_artists)
-
-    result_title_norm = _normalize_text(result_title or "")
-    result_artist_norm = _normalize_text(result_artist or "")
-
-    title_ok = (
-        expected_title in result_title_norm
-        or result_title_norm in expected_title
-        or _token_overlap(expected_title, result_title_norm) >= 0.6
-    )
-    artist_ok = any(
-        expected in result_artist_norm or result_artist_norm in expected
-        for expected in expected_artists
-        if expected
-    )
-    return title_ok and artist_ok
-
-
-def _token_overlap(left: str, right: str) -> float:
-    left_tokens = set(left.split())
-    right_tokens = set(right.split())
-    if not left_tokens or not right_tokens:
-        return 0.0
-    return len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
-
-
-def _acoustid_api_key() -> str:
-    api_key = os.environ.get("ACOUSTID_API_KEY", "").strip()
-    if not api_key:
-        raise EnvironmentError(
-            "Set ACOUSTID_API_KEY for chromaprint database lookup. "
-            "Register free at https://acoustid.org/new-application"
-        )
-    return api_key
-
-
-def _fingerprint_similarity(reference: Path, candidate: Path) -> float:
-    """Direct chromaprint comparison between two local clips (0–1)."""
-    import acoustid
-
-    if not acoustid.have_chromaprint:
-        return 0.0
-
-    ref_pair = acoustid.fingerprint_file(str(reference))
-    cand_pair = acoustid.fingerprint_file(str(candidate))
-    return max(0.0, min(1.0, float(acoustid.compare_fingerprints(ref_pair, cand_pair))))
-
-
-def _acoustid_lookup_certainty(clip_path: Path, track: TrackInfo) -> float:
-    """Look up a clip in the AcoustID database and score against Spotify metadata."""
-    import acoustid
-
-    api_key = _acoustid_api_key()
-
-    try:
-        results = acoustid.match(api_key, str(clip_path), meta="tracks")
-    except (acoustid.AcoustidError, acoustid.NoBackendError):
-        return 0.0
-
-    best = 0.0
-    for score, _recording_id, title, artist in results:
-        if _metadata_matches_spotify(track, title or "", artist or ""):
-            best = max(best, float(score))
-    return best
-
-
-def chromaprint_certainty(
-    reference_clip: Path,
-    candidate_clip: Path,
-    track: TrackInfo,
-) -> float:
-    """
-    Combine AcoustID database lookup on the candidate with direct fingerprint
-    similarity against the Spotify reference clip.
-    """
-    db_score = _acoustid_lookup_certainty(candidate_clip, track)
-    try:
-        fp_score = _fingerprint_similarity(reference_clip, candidate_clip)
-    except Exception:
-        fp_score = 0.0
-    return max(db_score, fp_score)
 
 
 def _compute_embedding(path: Path) -> np.ndarray:
@@ -182,24 +84,6 @@ def _download_match(
     )
 
 
-def _prepare_reference_clip(
-    spotify_link: str,
-    *,
-    window_seconds: float,
-    temp_dir: Path,
-) -> Path:
-    preview_url = get_spotify_preview_url(spotify_link)
-    if not preview_url:
-        raise ValueError(
-            "Spotify preview URL unavailable — audio matching requires a 30s preview."
-        )
-    return prepare_spotify_preview_middle_clip(
-        preview_url,
-        window_seconds=window_seconds,
-        output_path=temp_dir / "spotify_reference.wav",
-    )
-
-
 def _prepare_reference_clip_safe(
     spotify_link: str,
     *,
@@ -207,9 +91,14 @@ def _prepare_reference_clip_safe(
     temp_dir: Path,
 ) -> Optional[Path]:
     """Return the Spotify reference clip, or None if preview/extraction fails."""
+    preview_url = get_spotify_preview_url(spotify_link)
+    if not preview_url:
+        return None
     try:
-        return _prepare_reference_clip(
-            spotify_link, window_seconds=window_seconds, temp_dir=temp_dir
+        return prepare_spotify_preview_middle_clip(
+            preview_url,
+            window_seconds=window_seconds,
+            output_path=temp_dir / "spotify_reference.wav",
         )
     except Exception:
         return None
@@ -244,53 +133,53 @@ def match_by_chromaprint(
     middle_seconds: float = CHROMAPRINT_MIDDLE_SECONDS,
 ) -> Optional[AudioMatchResult]:
     """
-    Compare the middle chromaprint clip against AcoustID (+ fingerprint similarity).
+    Compare Spotify preview fingerprints against YouTube candidates.
 
-    Checks up to *max_attempts* top candidates. Stops immediately on first match
-    with certainty >= *certainty_threshold*.
+    Uses ``chromaprint_strategy`` (acoustid_api or local_scan) to choose the
+  comparison engine. Checks up to *max_attempts* top candidates and stops on
+    the first match with certainty >= *certainty_threshold*.
     """
+    del middle_seconds  # full 30s Spotify preview is fingerprinted; not a middle clip
     if not candidates:
         return None
 
-    window = _clamp_chromaprint_window(middle_seconds)
+    strategy = get_chromaprint_strategy()
     attempts = candidates[:max_attempts]
 
-    with tempfile.TemporaryDirectory(prefix="spotify_sync_chromaprint_") as tmp:
-        temp_dir = Path(tmp)
-        reference_clip = _prepare_reference_clip_safe(
-            spotify_link, window_seconds=window, temp_dir=temp_dir
-        )
-        if reference_clip is None:
-            return None
+    try:
+        spotify_fp = fingerprint_spotify_preview(spotify_link)
+    except Exception:
+        return None
 
-        for index, candidate in enumerate(attempts):
-            candidate_clip = _prepare_candidate_clip_safe(
-                candidate,
-                window_seconds=window,
-                output_path=temp_dir / f"candidate_{index}.wav",
+    for candidate in attempts:
+        try:
+            youtube_fp = fingerprint_youtube_candidate(
+                candidate.watch_url(),
+                strategy=strategy,
             )
-            if candidate_clip is None:
-                continue
+            certainty, matched = compare_fingerprints(
+                spotify_fp,
+                youtube_fp,
+                strategy=strategy,
+                threshold=certainty_threshold,
+            )
+        except Exception:
+            continue
 
-            try:
-                certainty = chromaprint_certainty(
-                    reference_clip, candidate_clip, track
-                )
-            except Exception:
-                continue
+        if not matched:
+            continue
 
-            if certainty >= certainty_threshold:
-                try:
-                    downloaded = _download_match(track, candidate, save_directory)
-                except Exception:
-                    continue
-                return AudioMatchResult(
-                    matched=True,
-                    certainty=certainty,
-                    method="chromaprint",
-                    video_id=candidate.video_id,
-                    downloaded_path=downloaded,
-                )
+        try:
+            downloaded = _download_match(track, candidate, save_directory)
+        except Exception:
+            continue
+        return AudioMatchResult(
+            matched=True,
+            certainty=certainty,
+            method="chromaprint",
+            video_id=candidate.video_id,
+            downloaded_path=downloaded,
+        )
 
     return None
 

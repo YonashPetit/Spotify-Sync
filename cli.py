@@ -420,6 +420,7 @@ def cmd_list_playlists(args: argparse.Namespace) -> dict:
 
 
 def _print_matching_toggles(config: matching_settings_mod.MatchingSettings) -> None:
+    print_human(f"Chromaprint strategy: {config.chromaprint_strategy}")
     print_human(
         "Duplicate phase: "
         f"chromaprint={_toggle_label(config.duplicate_chromaprint)}, "
@@ -517,6 +518,20 @@ def cmd_set_thresholds(args: argparse.Namespace) -> dict:
         print_human(f"Set {key} to {value}.")
     log_operation_success("set-thresholds")
     return {"matching_settings": config.as_dict(), "updated": updates}
+
+
+def cmd_set_chromaprint_strategy(args: argparse.Namespace) -> dict:
+    log_operation_start("set-chromaprint-strategy")
+    try:
+        strategy = matching_settings_mod.parse_chromaprint_strategy(args.strategy)
+        config = matching_settings_mod.update_matching_settings(
+            chromaprint_strategy=strategy
+        )
+    except ValueError as exc:
+        raise CliError("INVALID_ARGUMENT", str(exc)) from exc
+    print_human(f"Chromaprint strategy set to {config.chromaprint_strategy}.")
+    log_operation_success("set-chromaprint-strategy")
+    return {"matching_settings": config.as_dict()}
 
 
 def cmd_set_scoring_weights(args: argparse.Namespace) -> dict:
@@ -765,6 +780,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--json", action="store_true", help="Emit one JSON object on stdout."
     )
+    parser.add_argument(
+        "-cs",
+        "--chromaprint-strategy",
+        choices=list(matching_settings_mod.CHROMAPRINT_STRATEGIES),
+        help=(
+            "Override chromaprint engine for this command only "
+            "(acoustid_api or local_scan)."
+        ),
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser(
@@ -838,6 +862,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--max-audio-match-attempts", type=int, dest="max_audio_match_attempts"
+    )
+
+    p = subparsers.add_parser(
+        "set-chromaprint-strategy",
+        help="Set the global chromaprint engine (acoustid_api or local_scan).",
+    )
+    p.add_argument(
+        "strategy",
+        choices=list(matching_settings_mod.CHROMAPRINT_STRATEGIES),
+        help="acoustid_api = AcoustID API lookup; local_scan = sliding-window compare",
     )
 
     p = subparsers.add_parser(
@@ -925,6 +959,8 @@ def dispatch(args: argparse.Namespace, json_mode: bool) -> dict:
         return cmd_set_adopt_orphans(args)
     if args.command == "set-thresholds":
         return cmd_set_thresholds(args)
+    if args.command == "set-chromaprint-strategy":
+        return cmd_set_chromaprint_strategy(args)
     if args.command == "set-scoring-weights":
         return cmd_set_scoring_weights(args)
     if args.command == "add-track":
@@ -1010,6 +1046,8 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     db.init_db()
 
+    runtime_strategy = getattr(args, "chromaprint_strategy", None)
+    matching_settings_mod.set_runtime_chromaprint_strategy(runtime_strategy)
     try:
         try:
             data = dispatch(args, json_mode)
@@ -1032,6 +1070,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             emit_success(args.command, data)
         return EXIT_OK
     finally:
+        matching_settings_mod.set_runtime_chromaprint_strategy(None)
         db.reset_connection()
 
 

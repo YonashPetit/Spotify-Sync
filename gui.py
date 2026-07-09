@@ -443,13 +443,33 @@ class GuiApp:
         frame.columnconfigure(0, weight=1)
         frame.columnconfigure(1, weight=1)
 
+        engine_frame = ttk.Frame(frame)
+        engine_frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+        ttk.Label(engine_frame, text="Chromaprint Engine:").pack(side=tk.LEFT)
+        self.chromaprint_strategy_var = tk.StringVar()
+        self._chromaprint_strategy_labels = {
+            "acoustid_api": "AcoustID API (Fast / Low Bandwidth)",
+            "local_scan": "Local Scan (Deep Accuracy)",
+        }
+        self._chromaprint_strategy_values = {
+            label: key for key, label in self._chromaprint_strategy_labels.items()
+        }
+        ttk.Combobox(
+            engine_frame,
+            textvariable=self.chromaprint_strategy_var,
+            values=list(self._chromaprint_strategy_labels.values()),
+            state="readonly",
+            width=42,
+            font=UI_FONT,
+        ).pack(side=tk.LEFT, padx=(8, 0))
+
         # --- Duplicate check toggles ---
         dup_frame = ttk.LabelFrame(
             frame,
             text="Duplicate check (scan existing files in folder)",
             padding=8,
         )
-        dup_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        dup_frame.grid(row=1, column=0, sticky="nsew", padx=(0, 6))
         self.dup_chroma_var = tk.BooleanVar()
         self.dup_embed_var = tk.BooleanVar()
         ToggleButton(
@@ -479,7 +499,7 @@ class GuiApp:
             text="Source comparison (Spotify → YouTube matching)",
             padding=8,
         )
-        cmp_frame.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        cmp_frame.grid(row=1, column=1, sticky="nsew", padx=(6, 0))
         self.cmp_chroma_var = tk.BooleanVar()
         self.cmp_embed_var = tk.BooleanVar()
         self.cmp_metadata_fallback_var = tk.BooleanVar()
@@ -528,7 +548,7 @@ class GuiApp:
         weights_frame = ttk.LabelFrame(
             frame, text="Metadata scoring weights (must sum to 100)", padding=8
         )
-        weights_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        weights_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0))
         self.weight_vars: dict[str, tk.StringVar] = {}
         weight_fields = [
             ("Artist match %", "weight_artist"),
@@ -553,7 +573,7 @@ class GuiApp:
         self.weights_sum_label.grid(row=2, column=0, columnspan=3, sticky=tk.W, pady=(6, 0))
 
         btn_row = ttk.Frame(frame)
-        btn_row.grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=(10, 0))
+        btn_row.grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=(10, 0))
         ttk.Button(btn_row, text="Save settings", command=self._save_matching).pack(
             side=tk.LEFT, padx=(0, 6)
         )
@@ -803,6 +823,11 @@ class GuiApp:
 
     def _load_matching_settings_into_form(self) -> None:
         cfg = matching_settings_mod.load_matching_settings()
+        strategy_label = self._chromaprint_strategy_labels.get(
+            cfg.chromaprint_strategy,
+            self._chromaprint_strategy_labels["acoustid_api"],
+        )
+        self.chromaprint_strategy_var.set(strategy_label)
         self.dup_chroma_var.set(cfg.duplicate_chromaprint)
         self.dup_embed_var.set(cfg.duplicate_embedding)
         self.cmp_chroma_var.set(cfg.comparison_chromaprint)
@@ -1113,7 +1138,12 @@ class GuiApp:
 
     def _save_matching(self) -> None:
         def task() -> None:
+            strategy_label = self.chromaprint_strategy_var.get().strip()
+            strategy = self._chromaprint_strategy_values.get(
+                strategy_label, "acoustid_api"
+            )
             updates: dict = {
+                "chromaprint_strategy": strategy,
                 "duplicate_chromaprint": self.dup_chroma_var.get(),
                 "duplicate_embedding": self.dup_embed_var.get(),
                 "comparison_chromaprint": self.cmp_chroma_var.get(),

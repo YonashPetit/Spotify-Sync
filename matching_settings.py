@@ -9,12 +9,17 @@ from typing import Any, Optional
 import settings
 
 MATCHING_SETTINGS_KEY = "matching_settings"
+CHROMAPRINT_STRATEGIES = ("acoustid_api", "local_scan")
+DEFAULT_CHROMAPRINT_STRATEGY = "acoustid_api"
+
+_runtime_chromaprint_strategy: Optional[str] = None
 
 
 @dataclass
 class MatchingSettings:
     """Global audio matching configuration (any combination of the four toggles)."""
 
+    chromaprint_strategy: str = DEFAULT_CHROMAPRINT_STRATEGY
     duplicate_chromaprint: bool = False
     duplicate_embedding: bool = False
     comparison_chromaprint: bool = False
@@ -89,6 +94,28 @@ def _coerce_int(value: Any, default: int) -> int:
         return default
 
 
+def _coerce_strategy(value: Any, default: str) -> str:
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in CHROMAPRINT_STRATEGIES:
+            return normalized
+    return default
+
+
+def get_chromaprint_strategy() -> str:
+    if _runtime_chromaprint_strategy is not None:
+        return _runtime_chromaprint_strategy
+    return load_matching_settings().chromaprint_strategy
+
+
+def set_runtime_chromaprint_strategy(strategy: Optional[str]) -> None:
+    global _runtime_chromaprint_strategy
+    if strategy is None:
+        _runtime_chromaprint_strategy = None
+        return
+    _runtime_chromaprint_strategy = parse_chromaprint_strategy(strategy)
+
+
 def load_matching_settings() -> MatchingSettings:
     raw = settings.get_setting(MATCHING_SETTINGS_KEY)
     if not raw:
@@ -107,7 +134,9 @@ def load_matching_settings() -> MatchingSettings:
             continue
         value = data[field.name]
         default_value = getattr(defaults, field.name)
-        if isinstance(default_value, bool):
+        if field.name == "chromaprint_strategy":
+            kwargs[field.name] = _coerce_strategy(value, default_value)
+        elif isinstance(default_value, bool):
             kwargs[field.name] = _coerce_bool(value, default_value)
         elif isinstance(default_value, int):
             kwargs[field.name] = _coerce_int(value, default_value)
@@ -159,6 +188,21 @@ def _validate_matching_settings(config: MatchingSettings) -> None:
 
     if not 1 <= config.max_audio_match_attempts <= 9:
         raise ValueError("max_audio_match_attempts must be between 1 and 9")
+
+    if config.chromaprint_strategy not in CHROMAPRINT_STRATEGIES:
+        raise ValueError(
+            "chromaprint_strategy must be one of: "
+            + ", ".join(CHROMAPRINT_STRATEGIES)
+        )
+
+
+def parse_chromaprint_strategy(value: str) -> str:
+    normalized = value.strip().lower()
+    if normalized not in CHROMAPRINT_STRATEGIES:
+        raise ValueError(
+            f"chromaprint_strategy must be one of {CHROMAPRINT_STRATEGIES}, got {value!r}"
+        )
+    return normalized
 
 
 def parse_toggle(value: str) -> bool:

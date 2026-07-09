@@ -103,6 +103,7 @@ def gather_settings_overview() -> dict[str, Any]:
                 "Uses ISRC, YouTube filename patterns, and optional audio matchers."
             ),
             "audio_matching_toggles": {
+                "chromaprint_strategy": global_matching.chromaprint_strategy,
                 "duplicate_chromaprint": global_matching.duplicate_chromaprint,
                 "duplicate_embedding": global_matching.duplicate_embedding,
             },
@@ -159,6 +160,7 @@ def gather_settings_overview() -> dict[str, Any]:
                 },
             },
             "audio_matching_toggles": {
+                "chromaprint_strategy": global_matching.chromaprint_strategy,
                 "comparison_chromaprint": global_matching.comparison_chromaprint,
                 "comparison_embedding": global_matching.comparison_embedding,
                 "comparison_metadata_fallback": global_matching.comparison_metadata_fallback,
@@ -270,6 +272,7 @@ def print_settings_overview(data: dict[str, Any]) -> None:
 
     print_human("")
     print_human("=== Duplicate detection (folder scan) ===")
+    _line("Chromaprint strategy", dup_audio["chromaprint_strategy"])
     _line("Duplicate chromaprint", _bool_label(dup_audio["duplicate_chromaprint"]))
     _line("Duplicate embedding", _bool_label(dup_audio["duplicate_embedding"]))
     _line("ISRC check (per playlist default)", _bool_label(defaults["check_isrc"]))
@@ -306,6 +309,7 @@ def print_settings_overview(data: dict[str, Any]) -> None:
         _line(label, meta["weights_percent"][field], indent=2)
 
     print_human("  Comparison phase audio matching:")
+    _line("Chromaprint strategy", cmp_audio["chromaprint_strategy"], indent=2)
     _line("Chromaprint", _bool_label(cmp_audio["comparison_chromaprint"]), indent=2)
     _line("Vector embedding", _bool_label(cmp_audio["comparison_embedding"]), indent=2)
     _line(
