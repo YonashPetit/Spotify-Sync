@@ -31,6 +31,7 @@ from cli import (
     cmd_login,
     cmd_enable_playlist,
     cmd_remove_playlist,
+    cmd_reset_connection,
     cmd_resolve_duplicate,
     cmd_unset_playlist,
     cmd_select_download_path,
@@ -223,8 +224,11 @@ class GuiApp:
             side=tk.LEFT, padx=(0, 8)
         )
         ttk.Button(log_controls, text="Export log", command=self._export_log).pack(
-            side=tk.LEFT
+            side=tk.LEFT, padx=(0, 8)
         )
+        ttk.Button(
+            log_controls, text="Reset connection", command=self._reset_connection
+        ).pack(side=tk.LEFT)
 
     def _labeled_entry(
         self,
@@ -659,6 +663,13 @@ class GuiApp:
         self.log_text.configure(state=tk.NORMAL)
         self.log_text.delete("1.0", tk.END)
         self.log_text.configure(state=tk.DISABLED)
+
+    def _reset_connection(self) -> None:
+        self._run_task(
+            "reset connection",
+            lambda: cmd_reset_connection(_ns()),
+            refresh=False,
+        )
 
     def _route_mousewheel(self, event: tk.Event) -> None:
         hovered = self.root.winfo_containing(

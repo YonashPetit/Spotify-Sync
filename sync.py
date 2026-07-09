@@ -23,6 +23,7 @@ from output import (
     log_process_result,
     print_human,
 )
+import rate_limits
 from reconcile import (
     ReconcileReport,
     adopt_orphan_playlist_files,
@@ -216,6 +217,10 @@ def process_track_for_playlist(
             log_events=log_events,
         )
     except Exception as exc:  # noqa: BLE001 - report failure per track
+        rate_limits.note_exception(
+            exc,
+            operation=f"sync '{identity.title or 'track'}'",
+        )
         track_id: Optional[int] = None
         try:
             track_id = get_or_create_track(identity)
@@ -417,6 +422,10 @@ def _failed_sync_result(
     track_id: Optional[int],
     exc: Exception,
 ) -> ProcessResult:
+    rate_limits.note_exception(
+        exc,
+        operation=f"sync '{identity.title or 'track'}'",
+    )
     result = ProcessResult(
         status="failed",
         track_id=track_id,
@@ -500,6 +509,7 @@ def sync_playlist(playlist_id: int, *, json_mode: bool = False) -> SyncReport:
         except StopIteration:
             break
         except Exception as exc:  # noqa: BLE001 - keep partial progress
+            rate_limits.note_exception(exc, operation="playlist pagination")
             print_human(
                 f"Playlist pagination stopped early: {exc}. "
                 "Completed songs are saved; re-run sync to continue."

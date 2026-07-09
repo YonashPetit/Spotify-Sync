@@ -12,6 +12,7 @@ import libraries
 import matching_settings as matching_settings_mod
 import output
 import playlists as playlists_mod
+import rate_limits
 import settings
 import status_overview
 import sync as sync_mod
@@ -102,6 +103,7 @@ def _print_summary_human(summary: dict) -> None:
             f"{reconcile.get('orphans_unmatched', 0)} orphan(s) left unmatched."
         )
         print_human(reconcile_line)
+    rate_limits.print_summary_if_any()
 
 
 def _resolve_track_identity(args: argparse.Namespace) -> tuple[TrackIdentity, Optional[str]]:
@@ -579,8 +581,16 @@ def cmd_show_settings(args: argparse.Namespace) -> dict:
     log_operation_start("show-settings")
     overview = status_overview.gather_settings_overview()
     status_overview.print_settings_overview(overview)
+    rate_limits.print_summary_if_any()
     log_operation_success("show-settings")
     return overview
+
+
+def cmd_reset_connection(args: argparse.Namespace) -> dict:
+    log_operation_start("reset-connection")
+    result = rate_limits.reset_for_sync()
+    log_operation_success("reset-connection")
+    return result
 
 
 def cmd_sync(args: argparse.Namespace, json_mode: bool) -> dict:
@@ -902,6 +912,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--from-playlist", type=int)
     p.add_argument("--dest")
 
+    subparsers.add_parser(
+        "reset-connection",
+        help="Reset the database connection and clear recorded rate-limit hits.",
+    )
+
     p = subparsers.add_parser("sync", help="Sync tracked playlists.")
     p.add_argument("--playlist-id", type=int)
     p.add_argument("--all", action="store_true")
@@ -961,6 +976,8 @@ def dispatch(args: argparse.Namespace, json_mode: bool) -> dict:
         return cmd_list_playlists(args)
     if args.command == "show-settings":
         return cmd_show_settings(args)
+    if args.command == "reset-connection":
+        return cmd_reset_connection(args)
     if args.command == "set-audio-matching":
         return cmd_set_audio_matching(args)
     if args.command == "set-adopt-orphans":
@@ -1012,6 +1029,9 @@ def _map_exception(exc: Exception) -> CliError:
         from spotipy.exceptions import SpotifyException
 
         if isinstance(exc, SpotifyException):
+            if exc.http_status == 429:
+                rate_limits.note_exception(exc, operation="spotify api")
+                return CliError("RATE_LIMIT", str(exc), EXIT_EXTERNAL)
             if exc.http_status in (401, 403):
                 return CliError(
                     "SPOTIFY_AUTH_MISSING",
@@ -1022,18 +1042,23 @@ def _map_exception(exc: Exception) -> CliError:
     except ImportError:
         pass
     if isinstance(exc, DownloadError):
-        return CliError("DOWNLOAD_FAILED", str(exc), EXIT_EXTERNAL)
+        rate_limits.note_exception(exc, operation="download")
+        code = "RATE_LIMIT" if rate_limits.is_rate_limited(exc) else "DOWNLOAD_FAILED"
+        return CliError(code, str(exc), EXIT_EXTERNAL)
     try:
         import yt_dlp
 
         if isinstance(exc, yt_dlp.utils.YoutubeDLError):
-            return CliError("YOUTUBE_EXTRACT_FAILED", str(exc), EXIT_EXTERNAL)
+            rate_limits.note_exception(exc, operation="youtube download")
+            code = "RATE_LIMIT" if rate_limits.is_rate_limited(exc) else "YOUTUBE_EXTRACT_FAILED"
+            return CliError(code, str(exc), EXIT_EXTERNAL)
     except ImportError:
         pass
     if isinstance(exc, ValueError):
         return CliError("INVALID_ARGUMENT", str(exc))
     if isinstance(exc, LookupError):
         return CliError("TRACK_NOT_FOUND", str(exc))
+    rate_limits.note_exception(exc, operation="command")
     return CliError("DOWNLOAD_FAILED", str(exc), EXIT_EXTERNAL)
 
 
