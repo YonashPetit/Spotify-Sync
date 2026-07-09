@@ -22,6 +22,7 @@ def _no_download_message(
     candidate_count: int,
     audio_enabled: bool,
     metadata_fallback: bool,
+    audio_match_notes: list[str] | None = None,
 ) -> str:
     label = f"{identity.artist!r} - {identity.title!r}"
     if candidate_count == 0:
@@ -30,12 +31,15 @@ def _no_download_message(
             "no YouTube results met the metadata score threshold."
         )
     if audio_enabled and not metadata_fallback:
-        return (
+        message = (
             f"No download candidate found for {label}: "
             f"chromaprint/embedding found no confident match among "
             f"{candidate_count} metadata-ranked candidate(s). "
             "Enable comparison metadata fallback or adjust audio matching settings."
         )
+        if audio_match_notes:
+            message += " " + " ".join(audio_match_notes)
+        return message
     return f"No download candidate found for {label}."
 
 
@@ -117,6 +121,7 @@ def download_spotify_track(
             candidate_count=len(result.candidate_heap),
             audio_enabled=audio_enabled,
             metadata_fallback=allow_metadata_fallback,
+            audio_match_notes=result.audio_match_notes,
         )
     )
 

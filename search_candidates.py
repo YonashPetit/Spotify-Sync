@@ -183,6 +183,7 @@ class PipelineResult:
     match_method: Optional[str]
     audio_match_certainty: Optional[float]
     candidate_heap: list[RankedCandidate]
+    audio_match_notes: list[str] = field(default_factory=list)
 
     @property
     def best_candidate(self) -> Optional[RankedCandidate]:
@@ -650,7 +651,7 @@ def run_pipeline(
     sorted_candidates = heap_to_sorted_candidates(heap)
 
     if sorted_candidates and (use_chromaprint or use_embedding):
-        audio_result = resolve_by_audio_similarity(
+        audio_resolve = resolve_by_audio_similarity(
             track,
             sorted_candidates,
             save_directory,
@@ -658,6 +659,7 @@ def run_pipeline(
             enable_chromaprint=use_chromaprint,
             enable_embedding=use_embedding,
         )
+        audio_result = audio_resolve.match
         if audio_result is not None and audio_result.downloaded_path is not None:
             return PipelineResult(
                 track=track,
@@ -682,6 +684,7 @@ def run_pipeline(
             match_method=None,
             audio_match_certainty=None,
             candidate_heap=sorted_candidates,
+            audio_match_notes=audio_resolve.chromaprint_notes,
         )
 
     if sorted_candidates:

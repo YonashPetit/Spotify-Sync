@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
@@ -41,6 +41,14 @@ MAX_AUDIO_MATCH_ATTEMPTS = 3
 EMBEDDING_MATCH_THRESHOLD = 0.90
 
 
+CHROMAPRINT_PREVIEW_UNAVAILABLE = (
+    "Spotify preview unavailable — chromaprint matching requires a 30s preview."
+)
+CHROMAPRINT_PREVIEW_STREAM_FAILED = (
+    "Spotify preview could not be streamed or fingerprinted for chromaprint matching."
+)
+
+
 @dataclass
 class AudioMatchResult:
     matched: bool
@@ -48,6 +56,12 @@ class AudioMatchResult:
     method: str
     video_id: str
     downloaded_path: Optional[Path] = None
+
+
+@dataclass
+class AudioResolveResult:
+    match: Optional[AudioMatchResult] = None
+    chromaprint_notes: list[str] = field(default_factory=list)
 
 
 def _compute_embedding(path: Path) -> np.ndarray:
@@ -131,25 +145,35 @@ def match_by_chromaprint(
     certainty_threshold: float = AUDIO_MATCH_CERTAINTY,
     max_attempts: int = MAX_AUDIO_MATCH_ATTEMPTS,
     middle_seconds: float = CHROMAPRINT_MIDDLE_SECONDS,
-) -> Optional[AudioMatchResult]:
+) -> tuple[Optional[AudioMatchResult], list[str]]:
     """
     Compare Spotify preview fingerprints against YouTube candidates.
 
     Uses ``chromaprint_strategy`` (acoustid_api or local_scan) to choose the
   comparison engine. Checks up to *max_attempts* top candidates and stops on
     the first match with certainty >= *certainty_threshold*.
+
+    Returns ``(match_result, failure_notes)`` where *failure_notes* explain
+    why chromaprint could not run when no match is returned.
     """
     del middle_seconds  # full 30s Spotify preview is fingerprinted; not a middle clip
     if not candidates:
-        return None
+        return None, []
 
     strategy = get_chromaprint_strategy()
     attempts = candidates[:max_attempts]
+    notes: list[str] = []
+
+    preview_url = get_spotify_preview_url(spotify_link)
+    if not preview_url:
+        notes.append(CHROMAPRINT_PREVIEW_UNAVAILABLE)
+        return None, notes
 
     try:
         spotify_fp = fingerprint_spotify_preview(spotify_link)
     except Exception:
-        return None
+        notes.append(CHROMAPRINT_PREVIEW_STREAM_FAILED)
+        return None, notes
 
     for candidate in attempts:
         try:
@@ -179,9 +203,9 @@ def match_by_chromaprint(
             method="chromaprint",
             video_id=candidate.video_id,
             downloaded_path=downloaded,
-        )
+        ), notes
 
-    return None
+    return None, notes
 
 
 def match_by_embedding(
@@ -251,7 +275,7 @@ def resolve_by_audio_similarity(
     spotify_link: str,
     enable_chromaprint: Optional[bool] = None,
     enable_embedding: Optional[bool] = None,
-) -> Optional[AudioMatchResult]:
+) -> AudioResolveResult:
     """
     Run enabled audio matchers in order: chromaprint, then embedding.
 
@@ -273,9 +297,10 @@ def resolve_by_audio_similarity(
         else enable_embedding
     )
     max_attempts = global_settings.max_audio_match_attempts
+    chromaprint_notes: list[str] = []
 
     if use_chromaprint:
-        result = match_by_chromaprint(
+        result, chromaprint_notes = match_by_chromaprint(
             track,
             candidates,
             spotify_link=spotify_link,
@@ -284,7 +309,7 @@ def resolve_by_audio_similarity(
             max_attempts=max_attempts,
         )
         if result is not None:
-            return result
+            return AudioResolveResult(match=result, chromaprint_notes=chromaprint_notes)
 
     if use_embedding:
         result = match_by_embedding(
@@ -296,6 +321,9 @@ def resolve_by_audio_similarity(
             max_attempts=max_attempts,
         )
         if result is not None:
-            return result
+            return AudioResolveResult(
+                match=result,
+                chromaprint_notes=chromaprint_notes,
+            )
 
-    return None
+    return AudioResolveResult(match=None, chromaprint_notes=chromaprint_notes)

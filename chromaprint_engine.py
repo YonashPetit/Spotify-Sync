@@ -12,12 +12,21 @@ import urllib.parse
 import urllib.request
 from typing import Optional
 
-from audio_segments import _require_ffmpeg, get_youtube_stream_url
+from audio_segments import (
+    _require_ffmpeg,
+    effective_window,
+    get_youtube_stream_url,
+    middle_segment_start,
+)
 from get_content import get_spotify_preview_url
 from matching_settings import get_chromaprint_strategy
 
 SPOTIFY_PREVIEW_SECONDS = 30.0
-YOUTUBE_ACOUSTID_SECONDS = 60.0
+CHROMAPRINT_WINDOW_SECONDS = 30.0
+
+# pyacoustid fingerprint comparison tunables (see acoustid._match_fingerprints).
+MAX_BIT_ERROR = 2
+MAX_ALIGN_OFFSET = 120
 
 _FPCALC_DURATION_RE = re.compile(r"^DURATION=(\d+(?:\.\d+)?)\s*$", re.MULTILINE)
 _FPCALC_FINGERPRINT_RE = re.compile(r"^FINGERPRINT=(.+)\s*$", re.MULTILINE | re.DOTALL)
@@ -54,7 +63,8 @@ def _parse_fpcalc_output(stdout: str) -> tuple[float, str]:
 def _run_fpcalc_on_stream(
     stream_url: str,
     *,
-    duration_limit: Optional[float] = None,
+    window_seconds: Optional[float] = None,
+    track_duration_seconds: Optional[float] = None,
     raw: bool = True,
 ) -> tuple[float, str]:
     """Pipe ffmpeg WAV output into fpcalc and return (duration, fingerprint text)."""
@@ -62,8 +72,11 @@ def _run_fpcalc_on_stream(
     fpcalc = _require_fpcalc()
 
     ffmpeg_cmd = [ffmpeg, "-hide_banner", "-loglevel", "error"]
-    if duration_limit is not None:
-        ffmpeg_cmd.extend(["-t", f"{duration_limit:.3f}"])
+    if window_seconds is not None:
+        total_duration = track_duration_seconds or window_seconds
+        start = middle_segment_start(total_duration, window_seconds)
+        length = effective_window(total_duration, window_seconds)
+        ffmpeg_cmd.extend(["-ss", f"{start:.3f}", "-t", f"{length:.3f}"])
     ffmpeg_cmd.extend(["-i", stream_url, "-vn", "-ac", "1", "-ar", "44100", "-f", "wav", "-"])
 
     fpcalc_cmd = [fpcalc]
@@ -118,40 +131,63 @@ def _ints_to_ctypes(values: list[int]):
     return (ctypes.c_int * len(values))(*values)
 
 
-def _compare_raw_segments(left: list[int], right: list[int]) -> float:
-    if not left or not right or len(left) != len(right):
+def _popcount(value: int) -> int:
+    return int(value & 0xFFFFFFFF).bit_count()
+
+
+def _match_fingerprints(a: list[int], b: list[int]) -> float:
+    """
+    Compare two decompressed Chromaprint fingerprints (0–1).
+
+    Delegates to pyacoustid when installed; otherwise uses the same
+    bit-error / offset-histogram algorithm locally.
+    """
+    if not a or not b:
         return 0.0
     try:
-        import acoustid
-    except ImportError:
-        return 0.0
-    if not acoustid.have_chromaprint:
-        return 0.0
-    import chromaprint
+        from acoustid import _match_fingerprints as acoustid_match
 
-    left_arr = _ints_to_ctypes(left)
-    right_arr = _ints_to_ctypes(right)
-    score = chromaprint.chromaprint_compare(
-        left_arr, right_arr, len(left), len(right)
-    )
-    maxval = chromaprint.chromaprint_get_item_duration(0) * min(len(left), len(right))
-    if maxval <= 0:
-        return 0.0
-    return max(0.0, min(1.0, score / float(maxval)))
+        return float(acoustid_match(a, b))
+    except ImportError:
+        pass
+
+    asize = len(a)
+    bsize = len(b)
+    numcounts = asize + bsize + 1
+    counts = [0] * numcounts
+    for i in range(asize):
+        jbegin = max(0, i - MAX_ALIGN_OFFSET)
+        jend = min(bsize, i + MAX_ALIGN_OFFSET)
+        for j in range(jbegin, jend):
+            biterror = _popcount(a[i] ^ b[j])
+            if biterror <= MAX_BIT_ERROR:
+                counts[i - j + bsize] += 1
+
+    topcount = max(counts)
+    return topcount / min(asize, bsize)
 
 
 def sliding_window_similarity(short_raw: str, long_raw: str) -> float:
-    """Cross-correlate a short raw fingerprint across a longer one (0–1)."""
+    """
+    Locate a short reference fingerprint inside a longer candidate (0–1).
+
+    Slides the reference across the candidate in hash-sized steps and scores
+    each aligned window with ``_match_fingerprints``.
+    """
     short = _raw_fingerprint_to_ints(short_raw)
     long_fp = _raw_fingerprint_to_ints(long_raw)
-    if not short or not long_fp or len(short) > len(long_fp):
+    if not short or not long_fp:
         return 0.0
+    if len(short) > len(long_fp):
+        return 0.0
+    if len(short) == len(long_fp):
+        return _match_fingerprints(short, long_fp)
 
     window = len(short)
     best = 0.0
     for offset in range(len(long_fp) - window + 1):
-        score = _compare_raw_segments(short, long_fp[offset : offset + window])
-        best = max(best, score)
+        segment = long_fp[offset : offset + window]
+        best = max(best, _match_fingerprints(short, segment))
     return best
 
 
@@ -229,7 +265,8 @@ def fingerprint_spotify_preview(spotify_link: str) -> tuple[float, str]:
         )
     return _run_fpcalc_on_stream(
         preview_url,
-        duration_limit=SPOTIFY_PREVIEW_SECONDS,
+        window_seconds=CHROMAPRINT_WINDOW_SECONDS,
+        track_duration_seconds=SPOTIFY_PREVIEW_SECONDS,
         raw=True,
     )
 
@@ -239,15 +276,16 @@ def fingerprint_youtube_candidate(
     *,
     strategy: Optional[str] = None,
 ) -> tuple[float, str]:
-    stream_url, _duration = get_youtube_stream_url(watch_url)
+    stream_url, duration = get_youtube_stream_url(watch_url)
     active = strategy or get_chromaprint_strategy()
     if active == "acoustid_api":
         return _run_fpcalc_on_stream(
             stream_url,
-            duration_limit=YOUTUBE_ACOUSTID_SECONDS,
+            window_seconds=CHROMAPRINT_WINDOW_SECONDS,
+            track_duration_seconds=duration,
             raw=True,
         )
-    return _run_fpcalc_on_stream(stream_url, duration_limit=None, raw=True)
+    return _run_fpcalc_on_stream(stream_url, window_seconds=None, raw=True)
 
 
 def fingerprint_local_file(path: str) -> tuple[float, str]:
