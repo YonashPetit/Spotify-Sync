@@ -200,6 +200,39 @@ def _prepare_reference_clip(
     )
 
 
+def _prepare_reference_clip_safe(
+    spotify_link: str,
+    *,
+    window_seconds: float,
+    temp_dir: Path,
+) -> Optional[Path]:
+    """Return the Spotify reference clip, or None if preview/extraction fails."""
+    try:
+        return _prepare_reference_clip(
+            spotify_link, window_seconds=window_seconds, temp_dir=temp_dir
+        )
+    except Exception:
+        return None
+
+
+def _prepare_candidate_clip_safe(
+    candidate: RankedCandidate,
+    *,
+    window_seconds: float,
+    output_path: Path,
+) -> Optional[Path]:
+    """Return a candidate middle clip, or None if stream extraction fails."""
+    try:
+        return prepare_candidate_middle_clip(
+            candidate.watch_url(),
+            duration_seconds=float(candidate.duration or 0),
+            window_seconds=window_seconds,
+            output_path=output_path,
+        )
+    except Exception:
+        return None
+
+
 def match_by_chromaprint(
     track: TrackInfo,
     candidates: list[RankedCandidate],
@@ -224,23 +257,33 @@ def match_by_chromaprint(
 
     with tempfile.TemporaryDirectory(prefix="spotify_sync_chromaprint_") as tmp:
         temp_dir = Path(tmp)
-        reference_clip = _prepare_reference_clip(
+        reference_clip = _prepare_reference_clip_safe(
             spotify_link, window_seconds=window, temp_dir=temp_dir
         )
+        if reference_clip is None:
+            return None
 
         for index, candidate in enumerate(attempts):
-            candidate_clip = prepare_candidate_middle_clip(
-                candidate.watch_url(),
-                duration_seconds=float(candidate.duration or 0),
+            candidate_clip = _prepare_candidate_clip_safe(
+                candidate,
                 window_seconds=window,
                 output_path=temp_dir / f"candidate_{index}.wav",
             )
-            certainty = chromaprint_certainty(
-                reference_clip, candidate_clip, track
-            )
+            if candidate_clip is None:
+                continue
+
+            try:
+                certainty = chromaprint_certainty(
+                    reference_clip, candidate_clip, track
+                )
+            except Exception:
+                continue
 
             if certainty >= certainty_threshold:
-                downloaded = _download_match(track, candidate, save_directory)
+                try:
+                    downloaded = _download_match(track, candidate, save_directory)
+                except Exception:
+                    continue
                 return AudioMatchResult(
                     matched=True,
                     certainty=certainty,
@@ -275,21 +318,31 @@ def match_by_embedding(
 
     with tempfile.TemporaryDirectory(prefix="spotify_sync_embedding_") as tmp:
         temp_dir = Path(tmp)
-        reference_clip = _prepare_reference_clip(
+        reference_clip = _prepare_reference_clip_safe(
             spotify_link, window_seconds=middle_seconds, temp_dir=temp_dir
         )
+        if reference_clip is None:
+            return None
 
         for index, candidate in enumerate(attempts):
-            candidate_clip = prepare_candidate_middle_clip(
-                candidate.watch_url(),
-                duration_seconds=float(candidate.duration or 0),
+            candidate_clip = _prepare_candidate_clip_safe(
+                candidate,
                 window_seconds=middle_seconds,
                 output_path=temp_dir / f"candidate_{index}.wav",
             )
-            certainty = embedding_similarity(reference_clip, candidate_clip)
+            if candidate_clip is None:
+                continue
+
+            try:
+                certainty = embedding_similarity(reference_clip, candidate_clip)
+            except Exception:
+                continue
 
             if certainty >= certainty_threshold:
-                downloaded = _download_match(track, candidate, save_directory)
+                try:
+                    downloaded = _download_match(track, candidate, save_directory)
+                except Exception:
+                    continue
                 return AudioMatchResult(
                     matched=True,
                     certainty=certainty,

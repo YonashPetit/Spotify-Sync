@@ -393,9 +393,11 @@ def cmd_add_track(args: argparse.Namespace, json_mode: bool) -> dict:
     if result.status == "needs_user_choice":
         data["decision_request"] = _decision_request(result, library_id, playlist_id)
     if result.status == "failed":
-        raise CliError(
-            "DOWNLOAD_FAILED", result.message or "Download failed.", EXIT_EXTERNAL
-        )
+        if json_mode:
+            raise CliError(
+                "DOWNLOAD_FAILED", result.message or "Download failed.", EXIT_EXTERNAL
+            )
+        return data
     log_operation_success("add-track")
     return data
 
@@ -715,7 +717,20 @@ def cmd_resolve_duplicate(args: argparse.Namespace, json_mode: bool) -> dict:
             source_url=pending["source_url"],
         )
     except Exception as exc:
-        raise CliError("DOWNLOAD_FAILED", f"Download failed: {exc}", EXIT_EXTERNAL) from exc
+        result = ProcessResult(
+            status="failed",
+            track_id=pending["track_id"],
+            track=identity,
+            local_path=None,
+            duplicate=duplicate,
+            message=f"Download failed: {exc}",
+        )
+        log_process_result(result)
+        if json_mode:
+            raise CliError(
+                "DOWNLOAD_FAILED", result.message or "Download failed.", EXIT_EXTERNAL
+            ) from exc
+        return {"result": result.as_dict(), "action": args.action}
 
     match_note = sync_mod.describe_match_reason(match_method, match_certainty)
 
@@ -998,6 +1013,13 @@ def main(argv: Optional[list[str]] = None) -> int:
             else:
                 log_operation_error(args.command, str(error))
             return error.exit_code
+
+        if (
+            not json_mode
+            and args.command == "add-track"
+            and (data.get("result") or {}).get("status") == "failed"
+        ):
+            return EXIT_EXTERNAL
 
         if json_mode:
             emit_success(args.command, data)

@@ -21,6 +21,7 @@ import output
 import playlists as playlists_mod
 import settings
 from cli import (
+    CliError,
     _map_exception,
     cmd_add_playlist,
     cmd_add_track,
@@ -715,7 +716,8 @@ class GuiApp:
             except Exception as exc:
                 err = _map_exception(exc)
                 self._log_queue.put(f"ERROR [{err.code}]: {err}")
-                self._log_queue.put(traceback.format_exc())
+                if not isinstance(exc, CliError):
+                    self._log_queue.put(traceback.format_exc())
             finally:
                 self._log_queue.put(f"--- done: {label} ---")
                 self.root.after(0, lambda: self._finish_task(refresh))

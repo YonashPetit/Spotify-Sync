@@ -16,6 +16,29 @@ class DownloadError(RuntimeError):
     pass
 
 
+def _no_download_message(
+    identity: TrackIdentity,
+    *,
+    candidate_count: int,
+    audio_enabled: bool,
+    metadata_fallback: bool,
+) -> str:
+    label = f"{identity.artist!r} - {identity.title!r}"
+    if candidate_count == 0:
+        return (
+            f"No download candidate found for {label}: "
+            "no YouTube results met the metadata score threshold."
+        )
+    if audio_enabled and not metadata_fallback:
+        return (
+            f"No download candidate found for {label}: "
+            f"chromaprint/embedding found no confident match among "
+            f"{candidate_count} metadata-ranked candidate(s). "
+            "Enable comparison metadata fallback or adjust audio matching settings."
+        )
+    return f"No download candidate found for {label}."
+
+
 @dataclass
 class DownloadOutcome:
     path: Path
@@ -70,12 +93,18 @@ def download_spotify_track(
     )
     top = result.best_candidate
     if top is not None and allow_metadata_fallback:
-        filename_base = build_track_filename(identity.title, save_directory)
-        downloaded_path = download_audio(
-            top.watch_url(),
-            save_directory,
-            filename_base=filename_base,
-        )
+        try:
+            filename_base = build_track_filename(identity.title, save_directory)
+            downloaded_path = download_audio(
+                top.watch_url(),
+                save_directory,
+                filename_base=filename_base,
+            )
+        except Exception as exc:
+            raise DownloadError(
+                f"Metadata fallback download failed for "
+                f"{identity.artist!r} - {identity.title!r}: {exc}"
+            ) from exc
         return DownloadOutcome(
             path=downloaded_path,
             method="heap_top",
@@ -83,7 +112,12 @@ def download_spotify_track(
         )
 
     raise DownloadError(
-        f"No download candidate found for {identity.artist!r} - {identity.title!r}."
+        _no_download_message(
+            identity,
+            candidate_count=len(result.candidate_heap),
+            audio_enabled=audio_enabled,
+            metadata_fallback=allow_metadata_fallback,
+        )
     )
 
 
