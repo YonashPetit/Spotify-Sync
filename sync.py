@@ -491,6 +491,7 @@ def sync_playlist(playlist_id: int, *, json_mode: bool = False) -> SyncReport:
     results: list[ProcessResult] = list(reconcile_report.results)
     seen_track_ids: set[int] = set()
     total_items_seen = 0
+    batch_number = 0
 
     batch_iter = _iter_source_identity_batches(playlist)
     while True:
@@ -504,6 +505,17 @@ def sync_playlist(playlist_id: int, *, json_mode: bool = False) -> SyncReport:
                 "Completed songs are saved; re-run sync to continue."
             )
             break
+
+        if not batch:
+            continue
+
+        batch_number += 1
+        batch_start = total_items_seen + 1
+        batch_end = total_items_seen + len(batch)
+        print_human(
+            f"Syncing playlist page {batch_number} "
+            f"({len(batch)} track(s), items {batch_start}–{batch_end})…"
+        )
 
         for identity in batch:
             total_items_seen += 1

@@ -9,7 +9,7 @@ import spotipy
 
 PLAYLIST_PAGE_SIZE = 50
 
-from get_content import _create_spotify_client, get_track_info, parse_spotify_track_id
+from get_content import _create_spotify_client, extract_isrc_from_spotify_track, get_track_info, parse_spotify_track_id
 from models import TrackIdentity
 
 _SPOTIFY_PLAYLIST_ID_RE = re.compile(
@@ -75,7 +75,7 @@ def _identity_from_item(item: dict) -> Optional[TrackIdentity]:
     return TrackIdentity(
         spotify_track_id=track["id"],
         youtube_video_id=None,
-        isrc=(track.get("external_ids") or {}).get("isrc"),
+        isrc=extract_isrc_from_spotify_track(track),
         title=track.get("name", ""),
         artist=artists[0] if artists else "",
         duration_seconds=track.get("duration_ms", 0) // 1000,
@@ -160,7 +160,7 @@ def _iter_playlist_batches_offset(
         if batch:
             yield batch
 
-        if len(items) < batch_size or not results.get("next"):
+        if len(items) < batch_size:
             break
         offset += len(items)
 
@@ -171,7 +171,11 @@ def _iter_playlist_batches_next(
     *,
     batch_size: int,
 ) -> Iterator[list[TrackIdentity]]:
-    results = sp.playlist_items(playlist_id, additional_types=("track",))
+    results = sp.playlist_items(
+        playlist_id,
+        limit=batch_size,
+        additional_types=("track",),
+    )
     pending: list[TrackIdentity] = []
     while results:
         for identity in _identities_from_items(results.get("items", [])):
@@ -179,7 +183,9 @@ def _iter_playlist_batches_next(
             if len(pending) >= batch_size:
                 yield pending
                 pending = []
-        results = sp.next(results) if results.get("next") else None
+        if not results.get("next"):
+            break
+        results = sp.next(results)
     if pending:
         yield pending
 

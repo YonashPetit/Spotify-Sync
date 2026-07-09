@@ -5,6 +5,8 @@ from typing import Optional
 import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
 
+from isrc_match import normalize_isrc
+
 TrackInfo = tuple[
     str,  # track title
     str,  # primary artist
@@ -52,6 +54,18 @@ def _parse_release_year(release_date: str) -> int:
     return int(match.group(1))
 
 
+def extract_isrc_from_spotify_track(track: dict) -> Optional[str]:
+    """Extract the ISRC string from a Spotify API track ``external_ids`` payload."""
+    external_ids = track.get("external_ids")
+    if not isinstance(external_ids, dict):
+        return None
+    isrc = external_ids.get("isrc")
+    if not isrc or not isinstance(isrc, str):
+        return None
+    normalized = normalize_isrc(isrc)
+    return normalized or None
+
+
 def get_track_info(
     spotify_link: str,
     *,
@@ -74,7 +88,7 @@ def get_track_info(
     primary_artist = artists[0] if artists else ""
     featured_artists = tuple(artists[1:])
 
-    isrc = track.get("external_ids", {}).get("isrc")
+    isrc = extract_isrc_from_spotify_track(track)
     if not isrc:
         raise ValueError(
             f"ISRC not available for track {track.get('name', spotify_link)!r}"
@@ -93,6 +107,19 @@ def get_track_info(
         track.get("popularity", 0),
         release_year,
     )
+
+
+def get_isrc_from_spotify_link(
+    spotify_link: str,
+    *,
+    spotify_client: Optional[spotipy.Spotify] = None,
+) -> Optional[str]:
+    """Return the ISRC for a Spotify track URL, URI, or ID."""
+    sp = spotify_client or _create_spotify_client()
+    track = sp.track(spotify_link)
+    if track is None:
+        return None
+    return extract_isrc_from_spotify_track(track)
 
 
 def get_spotify_preview_url(

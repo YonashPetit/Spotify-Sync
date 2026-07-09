@@ -9,7 +9,8 @@ from typing import Literal, Optional
 from chromaprint_engine import (
     compare_fingerprints,
     fingerprint_local_file,
-    fingerprint_spotify_preview,
+    fingerprint_reference_preview,
+    resolve_reference_preview_url,
 )
 from isrc_match import normalize_isrc
 from matching_settings import get_chromaprint_strategy, load_matching_settings
@@ -37,15 +38,16 @@ def _file_matches_youtube_id(path: Path, video_id: str) -> bool:
 def _chromaprint_similarity_to_existing(
     identity: TrackIdentity, existing_path: Path
 ) -> Optional[float]:
-    if not identity.spotify_track_id or not existing_path.exists():
+    if not identity.isrc or not existing_path.exists():
         return None
     try:
         global_settings = load_matching_settings()
         strategy = get_chromaprint_strategy()
-        spotify_fp = fingerprint_spotify_preview(identity.spotify_track_id)
+        resolve_reference_preview_url(isrc=identity.isrc)
+        reference_fp = fingerprint_reference_preview(isrc=identity.isrc)
         local_fp = fingerprint_local_file(str(existing_path))
         score, _matched = compare_fingerprints(
-            spotify_fp,
+            reference_fp,
             local_fp,
             strategy=strategy,
             threshold=global_settings.chromaprint_match_certainty,

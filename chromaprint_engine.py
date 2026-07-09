@@ -12,17 +12,13 @@ import urllib.parse
 import urllib.request
 from typing import Optional
 
-from audio_segments import (
-    _require_ffmpeg,
-    effective_window,
-    get_youtube_stream_url,
-    middle_segment_start,
-)
-from get_content import get_spotify_preview_url
+from audio_segments import _require_ffmpeg, get_youtube_stream_url
+from get_content import get_isrc_from_spotify_link
+from itunes_lookup import lookup_preview_url_by_isrc
 from matching_settings import get_chromaprint_strategy
 
-SPOTIFY_PREVIEW_SECONDS = 30.0
-CHROMAPRINT_WINDOW_SECONDS = 30.0
+REFERENCE_PREVIEW_SECONDS = 30.0
+YOUTUBE_ACOUSTID_SECONDS = 60.0
 
 # pyacoustid fingerprint comparison tunables (see acoustid._match_fingerprints).
 MAX_BIT_ERROR = 2
@@ -63,21 +59,17 @@ def _parse_fpcalc_output(stdout: str) -> tuple[float, str]:
 def _run_fpcalc_on_stream(
     stream_url: str,
     *,
-    window_seconds: Optional[float] = None,
-    track_duration_seconds: Optional[float] = None,
+    max_duration: Optional[float] = None,
     raw: bool = True,
 ) -> tuple[float, str]:
     """Pipe ffmpeg WAV output into fpcalc and return (duration, fingerprint text)."""
     ffmpeg = _require_ffmpeg()
     fpcalc = _require_fpcalc()
 
-    ffmpeg_cmd = [ffmpeg, "-hide_banner", "-loglevel", "error"]
-    if window_seconds is not None:
-        total_duration = track_duration_seconds or window_seconds
-        start = middle_segment_start(total_duration, window_seconds)
-        length = effective_window(total_duration, window_seconds)
-        ffmpeg_cmd.extend(["-ss", f"{start:.3f}", "-t", f"{length:.3f}"])
-    ffmpeg_cmd.extend(["-i", stream_url, "-vn", "-ac", "1", "-ar", "44100", "-f", "wav", "-"])
+    ffmpeg_cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-i", stream_url]
+    if max_duration is not None:
+        ffmpeg_cmd.extend(["-t", f"{max_duration:.3f}"])
+    ffmpeg_cmd.extend(["-vn", "-ac", "1", "-ar", "44100", "-f", "wav", "-"])
 
     fpcalc_cmd = [fpcalc]
     if raw:
@@ -257,18 +249,43 @@ def _acoustid_recording_match_score(
     return best
 
 
-def fingerprint_spotify_preview(spotify_link: str) -> tuple[float, str]:
-    preview_url = get_spotify_preview_url(spotify_link)
+def resolve_reference_preview_url(
+    *,
+    isrc: Optional[str] = None,
+    spotify_link: Optional[str] = None,
+) -> str:
+    """Resolve an iTunes CDN preview URL from an ISRC (or Spotify link)."""
+    resolved_isrc = isrc
+    if not resolved_isrc and spotify_link:
+        resolved_isrc = get_isrc_from_spotify_link(spotify_link)
+    if not resolved_isrc:
+        raise ValueError("ISRC is required to resolve an iTunes preview URL.")
+
+    preview_url = lookup_preview_url_by_isrc(resolved_isrc)
     if not preview_url:
         raise ValueError(
-            "Spotify preview URL unavailable — chromaprint matching requires a 30s preview."
+            f"No iTunes preview URL found for ISRC {resolved_isrc!r}."
         )
-    return _run_fpcalc_on_stream(
-        preview_url,
-        window_seconds=CHROMAPRINT_WINDOW_SECONDS,
-        track_duration_seconds=SPOTIFY_PREVIEW_SECONDS,
-        raw=True,
-    )
+    return preview_url
+
+
+def fingerprint_reference_preview(
+    *,
+    isrc: Optional[str] = None,
+    spotify_link: Optional[str] = None,
+) -> tuple[float, str]:
+    """
+    Fingerprint the 30-second iTunes preview for a track identified by ISRC.
+
+    Streams ``ffmpeg -i <previewUrl> -f wav - | fpcalc -raw -`` in memory.
+    """
+    preview_url = resolve_reference_preview_url(isrc=isrc, spotify_link=spotify_link)
+    return _run_fpcalc_on_stream(preview_url, raw=True)
+
+
+def fingerprint_spotify_preview(spotify_link: str) -> tuple[float, str]:
+    """Backward-compatible alias: resolve ISRC from Spotify, fingerprint iTunes preview."""
+    return fingerprint_reference_preview(spotify_link=spotify_link)
 
 
 def fingerprint_youtube_candidate(
@@ -276,16 +293,15 @@ def fingerprint_youtube_candidate(
     *,
     strategy: Optional[str] = None,
 ) -> tuple[float, str]:
-    stream_url, duration = get_youtube_stream_url(watch_url)
+    stream_url, _duration = get_youtube_stream_url(watch_url)
     active = strategy or get_chromaprint_strategy()
     if active == "acoustid_api":
         return _run_fpcalc_on_stream(
             stream_url,
-            window_seconds=CHROMAPRINT_WINDOW_SECONDS,
-            track_duration_seconds=duration,
+            max_duration=YOUTUBE_ACOUSTID_SECONDS,
             raw=True,
         )
-    return _run_fpcalc_on_stream(stream_url, window_seconds=None, raw=True)
+    return _run_fpcalc_on_stream(stream_url, raw=True)
 
 
 def fingerprint_local_file(path: str) -> tuple[float, str]:

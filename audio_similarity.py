@@ -12,8 +12,9 @@ import numpy as np
 from audio_segments import prepare_candidate_middle_clip, prepare_spotify_preview_middle_clip
 from chromaprint_engine import (
     compare_fingerprints,
-    fingerprint_spotify_preview,
+    fingerprint_reference_preview,
     fingerprint_youtube_candidate,
+    resolve_reference_preview_url,
 )
 from download_audio import build_track_filename, download_audio
 from get_content import get_spotify_preview_url
@@ -42,10 +43,10 @@ EMBEDDING_MATCH_THRESHOLD = 0.90
 
 
 CHROMAPRINT_PREVIEW_UNAVAILABLE = (
-    "Spotify preview unavailable — chromaprint matching requires a 30s preview."
+    "No ISRC or iTunes preview available for chromaprint matching."
 )
 CHROMAPRINT_PREVIEW_STREAM_FAILED = (
-    "Spotify preview could not be streamed or fingerprinted for chromaprint matching."
+    "iTunes preview could not be streamed or fingerprinted for chromaprint matching."
 )
 
 
@@ -147,16 +148,16 @@ def match_by_chromaprint(
     middle_seconds: float = CHROMAPRINT_MIDDLE_SECONDS,
 ) -> tuple[Optional[AudioMatchResult], list[str]]:
     """
-    Compare Spotify preview fingerprints against YouTube candidates.
+    Compare iTunes ISRC preview fingerprints against YouTube candidates.
 
     Uses ``chromaprint_strategy`` (acoustid_api or local_scan) to choose the
-  comparison engine. Checks up to *max_attempts* top candidates and stops on
+    comparison engine. Checks up to *max_attempts* top candidates and stops on
     the first match with certainty >= *certainty_threshold*.
 
     Returns ``(match_result, failure_notes)`` where *failure_notes* explain
     why chromaprint could not run when no match is returned.
     """
-    del middle_seconds  # full 30s Spotify preview is fingerprinted; not a middle clip
+    del middle_seconds  # full 30s iTunes preview is fingerprinted
     if not candidates:
         return None, []
 
@@ -164,13 +165,19 @@ def match_by_chromaprint(
     attempts = candidates[:max_attempts]
     notes: list[str] = []
 
-    preview_url = get_spotify_preview_url(spotify_link)
-    if not preview_url:
+    _, _, _, _, _, spotify_isrc, _, _ = track
+    if not spotify_isrc:
         notes.append(CHROMAPRINT_PREVIEW_UNAVAILABLE)
         return None, notes
 
     try:
-        spotify_fp = fingerprint_spotify_preview(spotify_link)
+        resolve_reference_preview_url(isrc=spotify_isrc)
+    except ValueError:
+        notes.append(CHROMAPRINT_PREVIEW_UNAVAILABLE)
+        return None, notes
+
+    try:
+        reference_fp = fingerprint_reference_preview(isrc=spotify_isrc)
     except Exception:
         notes.append(CHROMAPRINT_PREVIEW_STREAM_FAILED)
         return None, notes
@@ -182,7 +189,7 @@ def match_by_chromaprint(
                 strategy=strategy,
             )
             certainty, matched = compare_fingerprints(
-                spotify_fp,
+                reference_fp,
                 youtube_fp,
                 strategy=strategy,
                 threshold=certainty_threshold,
