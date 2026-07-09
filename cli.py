@@ -262,6 +262,18 @@ def cmd_remove_playlist(args: argparse.Namespace) -> dict:
     return {"playlist": playlist, "removed": True}
 
 
+def cmd_unset_playlist(args: argparse.Namespace) -> dict:
+    log_operation_start("unset-playlist")
+    playlist = playlists_mod.set_playlist_enabled(args.playlist_id, False)
+    name = playlist["name"] or playlist["external_id"]
+    print_human(
+        f"Unset tracked playlist {name!r} (id={args.playlist_id}). "
+        "sync --all will skip it."
+    )
+    log_operation_success("unset-playlist")
+    return {"playlist": playlist, "unset": True}
+
+
 def cmd_set_cookies(args: argparse.Namespace) -> dict:
     log_operation_start("set-cookies")
     cookies_path = Path(args.cookies_file).expanduser()
@@ -534,6 +546,13 @@ def cmd_sync(args: argparse.Namespace, json_mode: bool) -> dict:
 
     if args.playlist_id is not None:
         playlist = playlists_mod.get_playlist(args.playlist_id)
+        if not playlist["enabled"]:
+            name = playlist["name"] or playlist["external_id"]
+            raise CliError(
+                "PLAYLIST_DISABLED",
+                f"Playlist {name!r} (id={args.playlist_id}) cannot be synced: "
+                "this song was unset/disabled.",
+            )
         playlist_name = playlist["name"] or playlist["external_id"]
         print_human(f"Syncing playlist {playlist_name!r} (id={args.playlist_id}).")
         report = sync_mod.sync_playlist(args.playlist_id, json_mode=json_mode)
@@ -777,6 +796,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--playlist-id", type=int, required=True)
 
+    p = subparsers.add_parser(
+        "unset-playlist",
+        help="Unset a tracked playlist so sync --all skips it.",
+    )
+    p.add_argument("--playlist-id", type=int, required=True)
+
     p = subparsers.add_parser("blacklist-song", help="Blacklist a track.")
     p.add_argument("--spotify-track-url")
     p.add_argument("--youtube-url")
@@ -827,6 +852,8 @@ def dispatch(args: argparse.Namespace, json_mode: bool) -> dict:
         return cmd_sync(args, json_mode)
     if args.command == "remove-playlist":
         return cmd_remove_playlist(args)
+    if args.command == "unset-playlist":
+        return cmd_unset_playlist(args)
     if args.command == "blacklist-song":
         return cmd_blacklist_song(args)
     if args.command == "list-blacklisted":
@@ -901,18 +928,21 @@ def main(argv: Optional[list[str]] = None) -> int:
     db.init_db()
 
     try:
-        data = dispatch(args, json_mode)
-    except Exception as exc:  # noqa: BLE001 - map everything to envelopes
-        error = _map_exception(exc)
-        if json_mode:
-            emit_error(args.command, error.code, str(error))
-        else:
-            log_operation_error(args.command, str(error))
-        return error.exit_code
+        try:
+            data = dispatch(args, json_mode)
+        except Exception as exc:  # noqa: BLE001 - map everything to envelopes
+            error = _map_exception(exc)
+            if json_mode:
+                emit_error(args.command, error.code, str(error))
+            else:
+                log_operation_error(args.command, str(error))
+            return error.exit_code
 
-    if json_mode:
-        emit_success(args.command, data)
-    return EXIT_OK
+        if json_mode:
+            emit_success(args.command, data)
+        return EXIT_OK
+    finally:
+        db.reset_connection()
 
 
 if __name__ == "__main__":

@@ -112,6 +112,19 @@ def remove_playlist(playlist_id: int) -> None:
     conn.commit()
 
 
+def set_playlist_enabled(playlist_id: int, enabled: bool) -> dict:
+    """Enable or disable tracking for a playlist without removing it."""
+    playlist = get_playlist(playlist_id)  # raises if missing
+    conn = db.get_connection()
+    conn.execute(
+        "UPDATE playlists SET enabled = ? WHERE id = ?",
+        (1 if enabled else 0, playlist_id),
+    )
+    conn.commit()
+    playlist["enabled"] = enabled
+    return playlist
+
+
 def playlist_duplicate_config(playlist_id: int) -> DuplicateConfig:
     conn = db.get_connection()
     row = conn.execute(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import queue
+import signal
 import sys
 import threading
 import traceback
@@ -28,6 +29,7 @@ from cli import (
     cmd_login,
     cmd_remove_playlist,
     cmd_resolve_duplicate,
+    cmd_unset_playlist,
     cmd_select_download_path,
     cmd_set_cookies,
     cmd_set_download_path,
@@ -188,7 +190,7 @@ class GuiApp:
             canvas.itemconfigure(self._canvas_window, width=event.width)
 
         canvas.bind("<Configure>", _fit_width)
-        canvas.bind_all(
+        canvas.bind(
             "<MouseWheel>",
             lambda e: canvas.yview_scroll(int(-1 * (e.delta / 120)), "units"),
         )
@@ -214,6 +216,10 @@ class GuiApp:
             font=LOG_FONT,
         )
         self.log_text.pack(fill=tk.BOTH, expand=True)
+        self.log_text.bind(
+            "<MouseWheel>",
+            lambda e: self.log_text.yview_scroll(int(-1 * (e.delta / 120)), "units"),
+        )
         ttk.Button(log_frame, text="Clear log", command=self._clear_log).pack(
             anchor=tk.E, pady=(6, 0)
         )
@@ -403,6 +409,9 @@ class GuiApp:
         ttk.Button(btn_row, text="Sync all enabled", command=self._sync_all).pack(
             side=tk.LEFT, padx=6
         )
+        ttk.Button(btn_row, text="Unset tracked", command=self._unset_playlist).pack(
+            side=tk.LEFT, padx=6
+        )
         ttk.Button(btn_row, text="Remove selected", command=self._remove_playlist).pack(
             side=tk.LEFT, padx=6
         )
@@ -585,11 +594,15 @@ class GuiApp:
     # ------------------------------------------------------------------ log
 
     def _append_log(self, text: str) -> None:
+        # Only stick to bottom if the user is already at bottom.
+        _first, last = self.log_text.yview()
+        should_autoscroll = last >= 0.999
         self.log_text.configure(state=tk.NORMAL)
         self.log_text.insert(tk.END, text)
         if not text.endswith("\n"):
             self.log_text.insert(tk.END, "\n")
-        self.log_text.see(tk.END)
+        if should_autoscroll:
+            self.log_text.see(tk.END)
         self.log_text.configure(state=tk.DISABLED)
 
     def _clear_log(self) -> None:
@@ -863,6 +876,19 @@ class GuiApp:
         if not ids:
             messagebox.showerror("No selection", "Select one or more playlists to sync.")
             return
+        disabled = [
+            row for row in self._playlist_rows if row["playlist_id"] in ids and not row["enabled"]
+        ]
+        if disabled:
+            names = ", ".join(
+                repr(row["name"] or row["external_id"]) for row in disabled
+            )
+            messagebox.showerror(
+                "Playlist unset",
+                "Cannot sync unset/disabled playlist(s): "
+                f"{names}. Re-enable or choose tracked playlists only.",
+            )
+            return
 
         def task() -> None:
             for playlist_id in ids:
@@ -874,6 +900,16 @@ class GuiApp:
         self._run_task(
             "sync all playlists",
             lambda: cmd_sync(_ns(playlist_id=None, all=True), json_mode=False),
+        )
+
+    def _unset_playlist(self) -> None:
+        ids = self._selected_playlist_ids()
+        if len(ids) != 1:
+            messagebox.showerror("Select one", "Select exactly one playlist to unset.")
+            return
+        self._run_task(
+            "unset playlist",
+            lambda: cmd_unset_playlist(_ns(playlist_id=ids[0])),
         )
 
     def _remove_playlist(self) -> None:
@@ -1028,7 +1064,27 @@ def main() -> None:
     scale = _enable_high_dpi()
     root = tk.Tk()
     GuiApp(root, scale)
-    root.mainloop()
+
+    shutting_down = {"value": False}
+
+    def _graceful_shutdown() -> None:
+        if shutting_down["value"]:
+            return
+        shutting_down["value"] = True
+        try:
+            db.reset_connection()
+        finally:
+            root.destroy()
+
+    def _handle_sigint(_signum, _frame) -> None:
+        root.after(0, _graceful_shutdown)
+
+    root.protocol("WM_DELETE_WINDOW", _graceful_shutdown)
+    signal.signal(signal.SIGINT, _handle_sigint)
+    try:
+        root.mainloop()
+    except KeyboardInterrupt:
+        _graceful_shutdown()
 
 
 if __name__ == "__main__":
