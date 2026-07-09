@@ -366,8 +366,9 @@ def resolve_by_audio_similarity(
     """
     Run enabled audio matchers in order: chromaprint, then embedding.
 
-    Each method examines up to MAX_AUDIO_MATCH_ATTEMPTS candidates and stops
-    immediately when the first candidate exceeds the configured certainty.
+    Each method examines up to the configured ``max_audio_match_attempts`` top
+    metadata-ranked candidates and stops immediately when the first candidate
+    exceeds the configured certainty.
     ``enable_*`` args override the module constants when not None.
     """
     save_directory = Path(save_directory)
@@ -382,6 +383,7 @@ def resolve_by_audio_similarity(
         if enable_embedding is None
         else enable_embedding
     )
+    max_attempts = global_settings.max_audio_match_attempts
 
     if use_chromaprint:
         result = match_by_chromaprint(
@@ -390,6 +392,7 @@ def resolve_by_audio_similarity(
             spotify_link=spotify_link,
             save_directory=save_directory,
             certainty_threshold=global_settings.chromaprint_match_certainty,
+            max_attempts=max_attempts,
         )
         if result is not None:
             return result
@@ -401,6 +404,7 @@ def resolve_by_audio_similarity(
             spotify_link=spotify_link,
             save_directory=save_directory,
             certainty_threshold=global_settings.embedding_match_threshold,
+            max_attempts=max_attempts,
         )
         if result is not None:
             return result

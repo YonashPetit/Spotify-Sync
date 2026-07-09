@@ -516,6 +516,13 @@ class GuiApp:
         ttk.Entry(
             cmp_frame, textvariable=self.threshold_vars["embedding_match_threshold"], width=12
         ).pack(anchor=tk.W, pady=2)
+        ttk.Label(cmp_frame, text="Audio match candidates (1–9):").pack(
+            anchor=tk.W, pady=(6, 0)
+        )
+        self.threshold_vars["max_audio_match_attempts"] = tk.StringVar()
+        ttk.Entry(
+            cmp_frame, textvariable=self.threshold_vars["max_audio_match_attempts"], width=12
+        ).pack(anchor=tk.W, pady=2)
 
         # --- Metadata scoring weights ---
         weights_frame = ttk.LabelFrame(
@@ -1116,7 +1123,10 @@ class GuiApp:
             for key, var in self.threshold_vars.items():
                 raw = var.get().strip()
                 if raw:
-                    updates[key] = float(raw)
+                    if key == "max_audio_match_attempts":
+                        updates[key] = int(raw)
+                    else:
+                        updates[key] = float(raw)
             for key, var in self.weight_vars.items():
                 raw = var.get().strip()
                 if raw:

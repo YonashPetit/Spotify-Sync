@@ -495,10 +495,14 @@ def cmd_set_thresholds(args: argparse.Namespace) -> dict:
         "audio_review_threshold",
         "chromaprint_match_certainty",
         "embedding_match_threshold",
+        "max_audio_match_attempts",
     ):
         value = getattr(args, field, None)
         if value is not None:
-            updates[field] = float(value)
+            if field == "max_audio_match_attempts":
+                updates[field] = int(value)
+            else:
+                updates[field] = float(value)
     if not updates:
         raise CliError(
             "INVALID_ARGUMENT",
@@ -831,6 +835,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--embedding-match-threshold", type=float, dest="embedding_match_threshold"
+    )
+    p.add_argument(
+        "--max-audio-match-attempts", type=int, dest="max_audio_match_attempts"
     )
 
     p = subparsers.add_parser(

@@ -25,6 +25,7 @@ class MatchingSettings:
     audio_review_threshold: float = 0.85
     chromaprint_match_certainty: float = 0.90
     embedding_match_threshold: float = 0.90
+    max_audio_match_attempts: int = 3
     weight_artist: float = 30.0
     weight_title: float = 30.0
     weight_duration: float = 20.0
@@ -81,6 +82,13 @@ def _coerce_float(value: Any, default: float) -> float:
         return default
 
 
+def _coerce_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def load_matching_settings() -> MatchingSettings:
     raw = settings.get_setting(MATCHING_SETTINGS_KEY)
     if not raw:
@@ -101,6 +109,8 @@ def load_matching_settings() -> MatchingSettings:
         default_value = getattr(defaults, field.name)
         if isinstance(default_value, bool):
             kwargs[field.name] = _coerce_bool(value, default_value)
+        elif isinstance(default_value, int):
+            kwargs[field.name] = _coerce_int(value, default_value)
         else:
             kwargs[field.name] = _coerce_float(value, default_value)
     return MatchingSettings(**kwargs)
@@ -146,6 +156,9 @@ def _validate_matching_settings(config: MatchingSettings) -> None:
                 raise ValueError(f"{name} must be between 0 and 100")
         elif not 0 <= value <= 1:
             raise ValueError(f"{name} must be between 0 and 1")
+
+    if not 1 <= config.max_audio_match_attempts <= 9:
+        raise ValueError("max_audio_match_attempts must be between 1 and 9")
 
 
 def parse_toggle(value: str) -> bool:

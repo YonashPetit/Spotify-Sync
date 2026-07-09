@@ -41,7 +41,6 @@ def gather_settings_overview() -> dict[str, Any]:
         EMBEDDING_MIDDLE_SECONDS,
         ENABLE_CHROMAPRINT_MATCH,
         ENABLE_EMBEDDING_MATCH,
-        MAX_AUDIO_MATCH_ATTEMPTS,
     )
     from download_audio import find_ffmpeg_location
     from spotify_auth import has_cached_token, redirect_uri, token_cache_path
@@ -167,7 +166,7 @@ def gather_settings_overview() -> dict[str, Any]:
             "audio_matching_thresholds": {
                 "chromaprint_match_certainty": global_matching.chromaprint_match_certainty,
                 "embedding_match_threshold": global_matching.embedding_match_threshold,
-                "max_audio_match_attempts": MAX_AUDIO_MATCH_ATTEMPTS,
+                "max_audio_match_attempts": global_matching.max_audio_match_attempts,
                 "chromaprint_middle_seconds": CHROMAPRINT_MIDDLE_SECONDS,
                 "embedding_middle_seconds": EMBEDDING_MIDDLE_SECONDS,
             },
