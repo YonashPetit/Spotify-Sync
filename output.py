@@ -77,6 +77,10 @@ def log_download_success(title: str) -> None:
     print_human(f"Completed download of '{song_title(title)}'.")
 
 
+def log_download_success_with_reason(title: str, reason: str) -> None:
+    print_human(f"Completed download of '{song_title(title)}' {reason}.")
+
+
 def log_download_failed(title: str, reason: str) -> None:
     print_human(f"Failed to download '{song_title(title)}' for {reason!r} reason.")
 
@@ -93,7 +97,10 @@ def log_process_result(result) -> None:
         return
     title = result.track.title
     if result.status == "downloaded":
-        log_download_success(title)
+        if result.message:
+            log_download_success_with_reason(title, result.message)
+        else:
+            log_download_success(title)
         return
     if result.status == "failed":
         reason = result.message or "unknown error"
@@ -104,6 +111,13 @@ def log_process_result(result) -> None:
         return
     if result.status == "already_present":
         log_track_skipped(title, "already present")
+        return
+    if result.status == "adopted":
+        print_human(
+            f"Adopted '{song_title(title)}' from playlist folder"
+            + (f" ({result.message})" if result.message else "")
+            + "."
+        )
         return
     if result.status == "skipped_duplicate":
         log_track_skipped(title, "duplicate")

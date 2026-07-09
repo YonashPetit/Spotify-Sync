@@ -11,6 +11,7 @@ from typing import Iterator, Optional
 import db
 import libraries
 import playlists as playlists_mod
+import settings
 from blacklist import is_blacklisted
 from downloader import download_spotify_track, download_youtube_track
 from duplicates import apply_duplicate_policy, find_duplicate_in_directory
@@ -21,6 +22,12 @@ from output import (
     log_download_start,
     log_process_result,
     print_human,
+)
+from reconcile import (
+    ReconcileReport,
+    adopt_orphan_playlist_files,
+    reconcile_missing_playlist_files,
+    track_file_present,
 )
 from sources import spotify_source, youtube_source
 from sources.spotify_source import PLAYLIST_PAGE_SIZE
@@ -37,6 +44,20 @@ SYNC_SONG_DELAY_SECONDS = 1.0
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def describe_match_reason(method: str, certainty: Optional[float]) -> str:
+    label_map = {
+        "isrc": "via ISRC match",
+        "chromaprint": "via chromaprint match certainty",
+        "embedding": "via vector embedding match",
+        "heap_top": "via metadata-ranked candidate",
+        "youtube_direct": "via direct YouTube URL",
+    }
+    label = label_map.get(method, f"via {method}")
+    if certainty is not None:
+        return f"{label} ({certainty:.2f})"
+    return label
 
 
 def _fetch_playlist_metadata(playlist: dict) -> dict:
@@ -60,10 +81,11 @@ class SyncReport:
     playlist_id: int
     results: list[ProcessResult] = field(default_factory=list)
     total_items_seen: int = 0
+    reconcile: Optional[ReconcileReport] = None
 
     @property
     def summary(self) -> dict:
-        return summarize_results(self.results, self.total_items_seen)
+        return summarize_results(self.results, self.total_items_seen, self.reconcile)
 
 
 def create_pending_decision(
@@ -127,20 +149,21 @@ def download_track(
     *,
     save_directory: Path,
     source_url: Optional[str] = None,
-) -> Path:
+) -> tuple[Path, str, Optional[float]]:
     if identity.spotify_track_id:
         url = source_url or spotify_source.track_url(identity.spotify_track_id)
-        local_path = download_spotify_track(
+        outcome = download_spotify_track(
             identity, save_directory=save_directory, spotify_url=url
         )
     else:
         url = source_url or youtube_source.watch_url(identity.youtube_video_id)
-        local_path = download_youtube_track(
+        outcome = download_youtube_track(
             identity, save_directory=save_directory, youtube_url=url
         )
 
+    local_path = outcome.path
     tag_downloaded_file(local_path, identity)
-    return local_path
+    return local_path, outcome.method, outcome.certainty
 
 
 def finalize_downloaded_track(
@@ -151,6 +174,7 @@ def finalize_downloaded_track(
     library_id: int,
     playlist_id: Optional[int],
     duplicate: Optional[DuplicateResult] = None,
+    message: Optional[str] = None,
 ) -> ProcessResult:
     """Record DB rows for a downloaded file."""
     link_track_to_library(track_id, library_id, str(local_path))
@@ -163,6 +187,7 @@ def finalize_downloaded_track(
         track=identity,
         local_path=str(local_path),
         duplicate=duplicate,
+        message=message,
     )
 
 
@@ -309,7 +334,7 @@ def _process_track_for_playlist_impl(
             log_download_start(identity.title)
 
     try:
-        local_path = download_track(
+        local_path, match_method, match_certainty = download_track(
             identity, save_directory=save_directory, source_url=source_url
         )
     except Exception as exc:  # noqa: BLE001 - report failure per track
@@ -325,6 +350,8 @@ def _process_track_for_playlist_impl(
             log_process_result(result)
         return result
 
+    match_note = describe_match_reason(match_method, match_certainty)
+
     result = finalize_downloaded_track(
         track_id=track_id,
         identity=identity,
@@ -332,6 +359,7 @@ def _process_track_for_playlist_impl(
         library_id=library_id,
         playlist_id=playlist_id,
         duplicate=duplicate,
+        message=match_note,
     )
     if log_events:
         log_process_result(result)
@@ -400,7 +428,11 @@ def _failed_sync_result(
     return result
 
 
-def summarize_results(results: list[ProcessResult], total_items_seen: int) -> dict:
+def summarize_results(
+    results: list[ProcessResult],
+    total_items_seen: int,
+    reconcile: Optional[ReconcileReport] = None,
+) -> dict:
     summary = {
         "total_items_seen": total_items_seen,
         "new_items_processed": len(results),
@@ -410,9 +442,12 @@ def summarize_results(results: list[ProcessResult], total_items_seen: int) -> di
         "needs_user_choice": 0,
         "failed": 0,
         "already_present": 0,
+        "adopted": 0,
     }
     for result in results:
         summary[result.status] += 1
+    if reconcile is not None:
+        summary["reconcile"] = reconcile.as_dict()
     return summary
 
 
@@ -426,6 +461,23 @@ def sync_playlist(playlist_id: int, *, json_mode: bool = False) -> SyncReport:
     save_directory.mkdir(parents=True, exist_ok=True)
     cover_path = _apply_playlist_cover(save_directory, playlist)
 
+    reconcile_report = ReconcileReport(
+        missing_links_cleared=reconcile_missing_playlist_files(
+            playlist_id=playlist_id,
+            library_id=library_id,
+            save_directory=save_directory,
+        )
+    )
+    if settings.get_adopt_orphan_files():
+        adopt_report = adopt_orphan_playlist_files(
+            playlist_id=playlist_id,
+            library_id=library_id,
+            save_directory=save_directory,
+        )
+        reconcile_report.orphans_adopted = adopt_report.orphans_adopted
+        reconcile_report.orphans_unmatched = adopt_report.orphans_unmatched
+        reconcile_report.results.extend(adopt_report.results)
+
     conn = db.get_connection()
     active_rows = conn.execute(
         "SELECT track_id FROM playlist_items WHERE playlist_id = ? "
@@ -434,7 +486,7 @@ def sync_playlist(playlist_id: int, *, json_mode: bool = False) -> SyncReport:
     ).fetchall()
     previously_active = {row["track_id"] for row in active_rows}
 
-    results: list[ProcessResult] = []
+    results: list[ProcessResult] = list(reconcile_report.results)
     seen_track_ids: set[int] = set()
     total_items_seen = 0
 
@@ -459,7 +511,7 @@ def sync_playlist(playlist_id: int, *, json_mode: bool = False) -> SyncReport:
                 track_id = get_or_create_track(identity)
                 seen_track_ids.add(track_id)
 
-                if track_id not in previously_active:
+                if not track_file_present(library_id, track_id, save_directory):
                     result = process_track_for_playlist(
                         playlist_id=playlist_id,
                         identity=identity,
@@ -490,6 +542,7 @@ def sync_playlist(playlist_id: int, *, json_mode: bool = False) -> SyncReport:
         playlist_id=playlist_id,
         results=results,
         total_items_seen=total_items_seen,
+        reconcile=reconcile_report,
     )
 
 

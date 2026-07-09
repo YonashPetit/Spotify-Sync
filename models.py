@@ -14,6 +14,7 @@ ProcessStatus = Literal[
     "needs_user_choice",
     "failed",
     "already_present",
+    "adopted",
 ]
 
 

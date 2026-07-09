@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Optional
@@ -14,6 +15,13 @@ from search_candidates import _normalize_text
 
 _AUDIO_EXTENSIONS = {".m4a", ".mp3", ".flac", ".opus", ".ogg", ".webm"}
 _LEGACY_ISRC_STEM_RE = re.compile(r"^([A-Z0-9]{12})(?:_|$)")
+
+
+@dataclass(frozen=True)
+class FileTrackMetadata:
+    title: str
+    artist: str
+    isrc: Optional[str]
 
 
 def normalize_title(value: str) -> str:
@@ -140,6 +148,95 @@ def get_library_track_path(library_id: int, track_id: int) -> Optional[str]:
         (library_id, track_id),
     ).fetchone()
     return row["local_path"] if row else None
+
+
+def unlink_track_from_library(library_id: int, track_id: int) -> None:
+    conn = db.get_connection()
+    conn.execute(
+        "DELETE FROM library_tracks WHERE library_id = ? AND track_id = ?",
+        (library_id, track_id),
+    )
+    conn.commit()
+
+
+def list_playlist_member_tracks(playlist_id: int) -> list[dict]:
+    conn = db.get_connection()
+    rows = conn.execute(
+        """
+        SELECT
+          t.id AS track_id,
+          t.spotify_track_id,
+          t.youtube_video_id,
+          t.isrc,
+          t.title_norm,
+          t.artist_norm,
+          t.duration_seconds
+        FROM playlist_items pi
+        JOIN tracks t ON t.id = pi.track_id
+        WHERE pi.playlist_id = ? AND pi.removed_at IS NULL
+        """,
+        (playlist_id,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def linked_paths_for_library(library_id: int) -> set[Path]:
+    conn = db.get_connection()
+    return {
+        Path(row["local_path"]).resolve()
+        for row in conn.execute(
+            "SELECT local_path FROM library_tracks WHERE library_id = ?",
+            (library_id,),
+        ).fetchall()
+    }
+
+
+def read_file_track_metadata(path: Path) -> FileTrackMetadata:
+    title = ""
+    artist = ""
+    try:
+        if path.suffix.lower() in (".m4a", ".mp4"):
+            from mutagen.mp4 import MP4
+
+            audio = MP4(str(path))
+            names = audio.get("\xa9nam")
+            if names:
+                title = str(names[0])
+            artists = audio.get("\xa9ART")
+            if artists:
+                artist = str(artists[0])
+        else:
+            import mutagen
+
+            audio = mutagen.File(str(path), easy=True)
+            if audio and audio.tags:
+                title_val = audio.tags.get("title")
+                if title_val:
+                    title = title_val[0]
+                artist_val = audio.tags.get("artist")
+                if artist_val:
+                    artist = artist_val[0]
+    except Exception:
+        pass
+
+    if not title.strip():
+        title = path.stem
+    return FileTrackMetadata(
+        title=title.strip(),
+        artist=artist.strip(),
+        isrc=read_file_isrc(path),
+    )
+
+
+def track_identity_from_member_row(row: dict) -> TrackIdentity:
+    return TrackIdentity(
+        spotify_track_id=row.get("spotify_track_id"),
+        youtube_video_id=row.get("youtube_video_id"),
+        isrc=row.get("isrc"),
+        title=row.get("title_norm") or "",
+        artist=row.get("artist_norm") or "",
+        duration_seconds=int(row.get("duration_seconds") or 0),
+    )
 
 
 def iter_audio_files(directory: Path) -> Iterator[Path]:

@@ -82,9 +82,18 @@ def _print_summary_human(summary: dict) -> None:
         f"{summary['skipped_duplicate']} duplicate-skipped, "
         f"{summary['skipped_blacklisted']} blacklisted, "
         f"{summary['already_present']} already present, "
+        f"{summary['adopted']} adopted, "
         f"{summary['needs_user_choice']} need choice, "
         f"{summary['failed']} failed."
     )
+    reconcile = summary.get("reconcile")
+    if reconcile:
+        print_human(
+            "Reconcile: "
+            f"{reconcile.get('missing_links_cleared', 0)} stale link(s) cleared, "
+            f"{reconcile.get('orphans_adopted', 0)} orphan(s) adopted, "
+            f"{reconcile.get('orphans_unmatched', 0)} orphan(s) left unmatched."
+        )
 
 
 def _resolve_track_identity(args: argparse.Namespace) -> tuple[TrackIdentity, Optional[str]]:
@@ -449,6 +458,17 @@ def cmd_set_audio_matching(args: argparse.Namespace) -> dict:
     return {"matching_settings": config.as_dict()}
 
 
+def cmd_set_adopt_orphans(args: argparse.Namespace) -> dict:
+    log_operation_start("set-adopt-orphans")
+    enabled = matching_settings_mod.parse_toggle(args.adopt)
+    settings.set_adopt_orphan_files(enabled)
+    print_human(
+        f"Adopt orphan playlist files: {'on' if enabled else 'off'}."
+    )
+    log_operation_success("set-adopt-orphans")
+    return {"adopt_orphan_files": enabled}
+
+
 def cmd_set_thresholds(args: argparse.Namespace) -> dict:
     log_operation_start("set-thresholds")
     updates: dict = {}
@@ -540,6 +560,8 @@ def cmd_sync(args: argparse.Namespace, json_mode: bool) -> dict:
             "results": results,
             "summary": report.summary,
         }
+        if report.reconcile is not None:
+            data["reconcile"] = report.reconcile.as_dict()
         if decision_requests:
             data["decision_requests"] = decision_requests
         return data
@@ -572,6 +594,7 @@ def cmd_sync(args: argparse.Namespace, json_mode: bool) -> dict:
         "needs_user_choice": 0,
         "failed": 0,
         "already_present": 0,
+        "adopted": 0,
     }
     for playlist_id, report in all_reports.items():
         playlist = playlists_mod.get_playlist(playlist_id)
@@ -671,13 +694,15 @@ def cmd_resolve_duplicate(args: argparse.Namespace, json_mode: bool) -> dict:
 
     log_download_start(identity.title)
     try:
-        local_path = sync_mod.download_track(
+        local_path, match_method, match_certainty = sync_mod.download_track(
             identity,
             save_directory=Path(pending["save_directory"]),
             source_url=pending["source_url"],
         )
     except Exception as exc:
         raise CliError("DOWNLOAD_FAILED", f"Download failed: {exc}", EXIT_EXTERNAL) from exc
+
+    match_note = sync_mod.describe_match_reason(match_method, match_certainty)
 
     result = sync_mod.finalize_downloaded_track(
         track_id=pending["track_id"],
@@ -686,6 +711,7 @@ def cmd_resolve_duplicate(args: argparse.Namespace, json_mode: bool) -> dict:
         library_id=pending["library_id"],
         playlist_id=pending["playlist_id"],
         duplicate=duplicate,
+        message=match_note,
     )
     sync_mod.delete_pending_decision(args.request_id)
     log_process_result(result)
@@ -752,6 +778,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--duplicate-embedding", choices=["on", "off"])
     p.add_argument("--comparison-chromaprint", choices=["on", "off"])
     p.add_argument("--comparison-embedding", choices=["on", "off"])
+
+    p = subparsers.add_parser(
+        "set-adopt-orphans",
+        help=(
+            "When on, sync tries to link orphan audio files in playlist folders "
+            "to tracked playlist songs using file metadata."
+        ),
+    )
+    p.add_argument("adopt", choices=["on", "off"])
 
     p = subparsers.add_parser(
         "set-thresholds",
@@ -842,6 +877,8 @@ def dispatch(args: argparse.Namespace, json_mode: bool) -> dict:
         return cmd_show_settings(args)
     if args.command == "set-audio-matching":
         return cmd_set_audio_matching(args)
+    if args.command == "set-adopt-orphans":
+        return cmd_set_adopt_orphans(args)
     if args.command == "set-thresholds":
         return cmd_set_thresholds(args)
     if args.command == "set-scoring-weights":

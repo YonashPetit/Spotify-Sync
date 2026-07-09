@@ -10,6 +10,7 @@ import db
 
 SELECTED_LIBRARY_KEY = "selected_library_id"
 COOKIES_FILE_KEY = "cookies_file"
+ADOPT_ORPHAN_FILES_KEY = "adopt_orphan_files"
 
 
 def get_setting(key: str) -> Optional[str]:
@@ -49,6 +50,14 @@ def get_cookies_file() -> Optional[str]:
 
 def set_cookies_file(path: str) -> None:
     set_setting(COOKIES_FILE_KEY, path)
+
+
+def get_adopt_orphan_files() -> bool:
+    return get_setting(ADOPT_ORPHAN_FILES_KEY) == "1"
+
+
+def set_adopt_orphan_files(enabled: bool) -> None:
+    set_setting(ADOPT_ORPHAN_FILES_KEY, "1" if enabled else "0")
 
 
 def is_json_mode(argv: Optional[list[str]] = None) -> bool:

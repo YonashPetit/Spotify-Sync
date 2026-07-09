@@ -9,6 +9,7 @@ import sys
 import threading
 import traceback
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Callable, Optional
@@ -190,10 +191,7 @@ class GuiApp:
             canvas.itemconfigure(self._canvas_window, width=event.width)
 
         canvas.bind("<Configure>", _fit_width)
-        canvas.bind(
-            "<MouseWheel>",
-            lambda e: canvas.yview_scroll(int(-1 * (e.delta / 120)), "units"),
-        )
+        self.settings_canvas = canvas
 
         body = self._scroll_body
         body.columnconfigure(0, weight=1)
@@ -216,12 +214,14 @@ class GuiApp:
             font=LOG_FONT,
         )
         self.log_text.pack(fill=tk.BOTH, expand=True)
-        self.log_text.bind(
-            "<MouseWheel>",
-            lambda e: self.log_text.yview_scroll(int(-1 * (e.delta / 120)), "units"),
+        self.root.bind_all("<MouseWheel>", self._route_mousewheel, add="+")
+        log_controls = ttk.Frame(log_frame)
+        log_controls.pack(fill=tk.X, pady=(6, 0))
+        ttk.Button(log_controls, text="Clear log", command=self._clear_log).pack(
+            side=tk.LEFT, padx=(0, 8)
         )
-        ttk.Button(log_frame, text="Clear log", command=self._clear_log).pack(
-            anchor=tk.E, pady=(6, 0)
+        ttk.Button(log_controls, text="Export log", command=self._export_log).pack(
+            side=tk.LEFT
         )
 
     def _labeled_entry(
@@ -402,19 +402,31 @@ class GuiApp:
         self.playlist_listbox.configure(yscrollcommand=pl_scroll.set)
 
         btn_row = ttk.Frame(frame)
-        btn_row.grid(row=4, column=0, columnspan=3, sticky=tk.W, pady=(8, 0))
-        ttk.Button(btn_row, text="Sync selected", command=self._sync_selected).pack(
+        btn_row.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        btn_row.columnconfigure(0, weight=1)
+
+        sync_btns = ttk.Frame(btn_row)
+        sync_btns.pack(side=tk.LEFT)
+        ttk.Button(sync_btns, text="Sync selected", command=self._sync_selected).pack(
             side=tk.LEFT, padx=(0, 6)
         )
-        ttk.Button(btn_row, text="Sync all enabled", command=self._sync_all).pack(
+        ttk.Button(sync_btns, text="Sync all enabled", command=self._sync_all).pack(
             side=tk.LEFT, padx=6
         )
-        ttk.Button(btn_row, text="Unset tracked", command=self._unset_playlist).pack(
+        ttk.Button(sync_btns, text="Unset tracked", command=self._unset_playlist).pack(
             side=tk.LEFT, padx=6
         )
-        ttk.Button(btn_row, text="Remove selected", command=self._remove_playlist).pack(
+        ttk.Button(sync_btns, text="Remove selected", command=self._remove_playlist).pack(
             side=tk.LEFT, padx=6
         )
+
+        adopt_btns = ttk.Frame(btn_row)
+        adopt_btns.pack(side=tk.RIGHT)
+        self.adopt_orphans_var = tk.BooleanVar(value=settings.get_adopt_orphan_files())
+        ToggleButton(
+            adopt_btns, "Adopt orphan files", self.adopt_orphans_var
+        ).pack(side=tk.RIGHT)
+        self.adopt_orphans_var.trace_add("write", self._save_adopt_orphans_setting)
 
         self._playlist_rows: list[dict] = []
 
@@ -610,6 +622,38 @@ class GuiApp:
         self.log_text.delete("1.0", tk.END)
         self.log_text.configure(state=tk.DISABLED)
 
+    def _route_mousewheel(self, event: tk.Event) -> None:
+        hovered = self.root.winfo_containing(
+            self.root.winfo_pointerx(), self.root.winfo_pointery()
+        )
+        if hovered is None:
+            return
+
+        steps = int(-1 * (event.delta / 120))
+        if steps == 0:
+            return
+
+        if self._is_descendant_of(hovered, self.log_text):
+            self.log_text.yview_scroll(steps, "units")
+            return
+
+        if self._is_descendant_of(hovered, self._scroll_body) or self._is_descendant_of(
+            hovered, self.settings_canvas
+        ):
+            self.settings_canvas.yview_scroll(steps, "units")
+
+    @staticmethod
+    def _is_descendant_of(widget: tk.Widget, ancestor: tk.Widget) -> bool:
+        current = widget
+        while current is not None:
+            if current == ancestor:
+                return True
+            parent_name = current.winfo_parent()
+            if not parent_name:
+                break
+            current = current.nametowidget(parent_name)
+        return False
+
     def _poll_log_queue(self) -> None:
         while True:
             try:
@@ -797,6 +841,31 @@ class GuiApp:
         if path:
             self.cookies_var.set(path)
 
+    def _export_log(self) -> None:
+        text = self.log_text.get("1.0", tk.END).strip()
+        if not text:
+            messagebox.showerror("Export failed", "Log is empty.")
+            return
+
+        initialdir = None
+        selected = self._selected_library()
+        if selected:
+            initialdir = selected["path"]
+
+        default_name = f"spotify_sync_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        out_path = filedialog.asksaveasfilename(
+            title="Export log",
+            defaultextension=".txt",
+            filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
+            initialfile=default_name,
+            initialdir=initialdir,
+        )
+        if not out_path:
+            return
+
+        Path(out_path).write_text(text + "\n", encoding="utf-8")
+        self._append_log(f"Exported log to {out_path}")
+
     def _register_library(self) -> None:
         path = self.library_path_var.get().strip()
         if not path:
@@ -870,6 +939,9 @@ class GuiApp:
                 )
             ),
         )
+
+    def _save_adopt_orphans_setting(self, *_args) -> None:
+        settings.set_adopt_orphan_files(bool(self.adopt_orphans_var.get()))
 
     def _sync_selected(self) -> None:
         ids = self._selected_playlist_ids()

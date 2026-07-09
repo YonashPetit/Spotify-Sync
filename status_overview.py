@@ -179,6 +179,14 @@ def gather_settings_overview() -> dict[str, Any]:
                 "description": "Try YouTube Music / YouTube ISRC search before metadata heap.",
             },
         },
+        "sync": {
+            "adopt_orphan_files": settings.get_adopt_orphan_files(),
+            "description": (
+                "Before downloading, reconcile playlist folders with the database. "
+                "Missing files clear stale links so they can be re-downloaded. "
+                "When adopt is on, orphan files may be linked to playlist tracks."
+            ),
+        },
         "stats": {
             "libraries": _db_count("libraries"),
             "playlists_total": len(playlist_rows),
@@ -325,6 +333,13 @@ def print_settings_overview(data: dict[str, Any]) -> None:
         audio_thresholds["embedding_middle_seconds"],
         indent=2,
     )
+
+    print_human("")
+    print_human("=== Sync behavior ===")
+    sync_cfg = overview["sync"]
+    _line("Adopt orphan playlist files", _bool_label(sync_cfg["adopt_orphan_files"]))
+    _line("Reconcile missing files on sync", "always on")
+    _line("Notes", sync_cfg["description"])
 
     print_human("")
     print_human("=== Stats ===")

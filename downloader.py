@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 from download_audio import build_track_filename, download_audio
@@ -15,6 +16,13 @@ class DownloadError(RuntimeError):
     pass
 
 
+@dataclass
+class DownloadOutcome:
+    path: Path
+    method: str
+    certainty: float | None = None
+
+
 def download_spotify_track(
     identity: TrackIdentity,
     *,
@@ -22,7 +30,7 @@ def download_spotify_track(
     spotify_url: str,
     enable_chromaprint: bool | None = None,
     enable_embedding: bool | None = None,
-) -> Path:
+) -> DownloadOutcome:
     """
     Run the full matching pipeline for a Spotify track.
 
@@ -49,15 +57,24 @@ def download_spotify_track(
     )
 
     if result.downloaded_path is not None:
-        return result.downloaded_path
+        return DownloadOutcome(
+            path=result.downloaded_path,
+            method=result.match_method or "unknown",
+            certainty=result.audio_match_certainty,
+        )
 
     top = result.best_candidate
     if top is not None:
         filename_base = build_track_filename(identity.title, save_directory)
-        return download_audio(
+        downloaded_path = download_audio(
             top.watch_url(),
             save_directory,
             filename_base=filename_base,
+        )
+        return DownloadOutcome(
+            path=downloaded_path,
+            method="heap_top",
+            certainty=None,
         )
 
     raise DownloadError(
@@ -70,12 +87,13 @@ def download_youtube_track(
     *,
     save_directory: Path,
     youtube_url: str,
-) -> Path:
+) -> DownloadOutcome:
     """Direct download via download_audio() using the video URL."""
     video_id = identity.youtube_video_id or parse_video_id(youtube_url)
     filename_base = build_track_filename(identity.title, save_directory)
-    return download_audio(
+    downloaded_path = download_audio(
         watch_url(video_id),
         save_directory,
         filename_base=filename_base,
     )
+    return DownloadOutcome(path=downloaded_path, method="youtube_direct", certainty=None)
