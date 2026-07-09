@@ -276,11 +276,23 @@ def cmd_unset_playlist(args: argparse.Namespace) -> dict:
     playlist = playlists_mod.set_playlist_enabled(args.playlist_id, False)
     name = playlist["name"] or playlist["external_id"]
     print_human(
-        f"Unset tracked playlist {name!r} (id={args.playlist_id}). "
+        f"Disabled playlist {name!r} (id={args.playlist_id}). "
         "sync --all will skip it."
     )
     log_operation_success("unset-playlist")
     return {"playlist": playlist, "unset": True}
+
+
+def cmd_enable_playlist(args: argparse.Namespace) -> dict:
+    log_operation_start("enable-playlist")
+    playlist = playlists_mod.set_playlist_enabled(args.playlist_id, True)
+    name = playlist["name"] or playlist["external_id"]
+    print_human(
+        f"Enabled playlist {name!r} (id={args.playlist_id}). "
+        "It will be included in sync --all."
+    )
+    log_operation_success("enable-playlist")
+    return {"playlist": playlist, "enabled": True}
 
 
 def cmd_set_cookies(args: argparse.Namespace) -> dict:
@@ -833,7 +845,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = subparsers.add_parser(
         "unset-playlist",
-        help="Unset a tracked playlist so sync --all skips it.",
+        help="Disable a tracked playlist so sync --all skips it.",
+    )
+    p.add_argument("--playlist-id", type=int, required=True)
+
+    p = subparsers.add_parser(
+        "enable-playlist",
+        help="Re-enable a disabled playlist for sync --all.",
     )
     p.add_argument("--playlist-id", type=int, required=True)
 
@@ -891,6 +909,8 @@ def dispatch(args: argparse.Namespace, json_mode: bool) -> dict:
         return cmd_remove_playlist(args)
     if args.command == "unset-playlist":
         return cmd_unset_playlist(args)
+    if args.command == "enable-playlist":
+        return cmd_enable_playlist(args)
     if args.command == "blacklist-song":
         return cmd_blacklist_song(args)
     if args.command == "list-blacklisted":

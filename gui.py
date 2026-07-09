@@ -28,6 +28,7 @@ from cli import (
     cmd_delete_download_path,
     cmd_list_blacklisted,
     cmd_login,
+    cmd_enable_playlist,
     cmd_remove_playlist,
     cmd_resolve_duplicate,
     cmd_unset_playlist,
@@ -413,7 +414,10 @@ class GuiApp:
         ttk.Button(sync_btns, text="Sync all enabled", command=self._sync_all).pack(
             side=tk.LEFT, padx=6
         )
-        ttk.Button(sync_btns, text="Unset tracked", command=self._unset_playlist).pack(
+        ttk.Button(sync_btns, text="Disable selected", command=self._disable_playlist).pack(
+            side=tk.LEFT, padx=6
+        )
+        ttk.Button(sync_btns, text="Enable selected", command=self._enable_playlist).pack(
             side=tk.LEFT, padx=6
         )
         ttk.Button(sync_btns, text="Remove selected", command=self._remove_playlist).pack(
@@ -956,9 +960,9 @@ class GuiApp:
                 repr(row["name"] or row["external_id"]) for row in disabled
             )
             messagebox.showerror(
-                "Playlist unset",
-                "Cannot sync unset/disabled playlist(s): "
-                f"{names}. Re-enable or choose tracked playlists only.",
+                "Playlist disabled",
+                "Cannot sync disabled playlist(s): "
+                f"{names}. Enable them or choose enabled playlists only.",
             )
             return
 
@@ -974,14 +978,24 @@ class GuiApp:
             lambda: cmd_sync(_ns(playlist_id=None, all=True), json_mode=False),
         )
 
-    def _unset_playlist(self) -> None:
+    def _disable_playlist(self) -> None:
         ids = self._selected_playlist_ids()
         if len(ids) != 1:
-            messagebox.showerror("Select one", "Select exactly one playlist to unset.")
+            messagebox.showerror("Select one", "Select exactly one playlist to disable.")
             return
         self._run_task(
-            "unset playlist",
+            "disable playlist",
             lambda: cmd_unset_playlist(_ns(playlist_id=ids[0])),
+        )
+
+    def _enable_playlist(self) -> None:
+        ids = self._selected_playlist_ids()
+        if len(ids) != 1:
+            messagebox.showerror("Select one", "Select exactly one playlist to enable.")
+            return
+        self._run_task(
+            "enable playlist",
+            lambda: cmd_enable_playlist(_ns(playlist_id=ids[0])),
         )
 
     def _remove_playlist(self) -> None:
