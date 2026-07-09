@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 from typing import Optional
 
 from app_paths import get_db_path
@@ -97,7 +98,7 @@ CREATE INDEX IF NOT EXISTS idx_blacklist_track ON blacklist(track_id);
 CREATE INDEX IF NOT EXISTS idx_playlist_items_playlist ON playlist_items(playlist_id);
 """
 
-_conn: Optional[sqlite3.Connection] = None
+_local = threading.local()
 
 
 def connect() -> sqlite3.Connection:
@@ -105,6 +106,7 @@ def connect() -> sqlite3.Connection:
     conn = sqlite3.connect(str(get_db_path()))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA journal_mode = WAL")
     return conn
 
 
@@ -114,12 +116,13 @@ def migrate(conn: sqlite3.Connection) -> None:
 
 
 def get_connection() -> sqlite3.Connection:
-    """Shared process-wide connection with schema applied."""
-    global _conn
-    if _conn is None:
-        _conn = connect()
-        migrate(_conn)
-    return _conn
+    """Return a per-thread connection with schema applied."""
+    conn: Optional[sqlite3.Connection] = getattr(_local, "conn", None)
+    if conn is None:
+        conn = connect()
+        migrate(conn)
+        _local.conn = conn
+    return conn
 
 
 def init_db() -> None:
@@ -127,8 +130,8 @@ def init_db() -> None:
 
 
 def reset_connection() -> None:
-    """Close the shared connection (used by tests when switching DB paths)."""
-    global _conn
-    if _conn is not None:
-        _conn.close()
-        _conn = None
+    """Close the current thread's connection (used by tests when switching DB paths)."""
+    conn: Optional[sqlite3.Connection] = getattr(_local, "conn", None)
+    if conn is not None:
+        conn.close()
+        del _local.conn
