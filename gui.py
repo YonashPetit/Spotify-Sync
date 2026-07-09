@@ -481,11 +481,17 @@ class GuiApp:
         cmp_frame.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
         self.cmp_chroma_var = tk.BooleanVar()
         self.cmp_embed_var = tk.BooleanVar()
+        self.cmp_metadata_fallback_var = tk.BooleanVar()
         ToggleButton(
             cmp_frame, "Chromaprint", self.cmp_chroma_var
         ).pack(fill=tk.X, pady=4)
         ToggleButton(
             cmp_frame, "Vector embedding", self.cmp_embed_var
+        ).pack(fill=tk.X, pady=4)
+        ToggleButton(
+            cmp_frame,
+            "Metadata match (last resort)",
+            self.cmp_metadata_fallback_var,
         ).pack(fill=tk.X, pady=4)
 
         ttk.Label(cmp_frame, text="Metadata minimum rating (0–100):").pack(
@@ -792,6 +798,7 @@ class GuiApp:
         self.dup_embed_var.set(cfg.duplicate_embedding)
         self.cmp_chroma_var.set(cfg.comparison_chromaprint)
         self.cmp_embed_var.set(cfg.comparison_embedding)
+        self.cmp_metadata_fallback_var.set(cfg.comparison_metadata_fallback)
         for key, var in self.threshold_vars.items():
             var.set(str(getattr(cfg, key)))
         for key, var in self.weight_vars.items():
@@ -1102,6 +1109,7 @@ class GuiApp:
                 "duplicate_embedding": self.dup_embed_var.get(),
                 "comparison_chromaprint": self.cmp_chroma_var.get(),
                 "comparison_embedding": self.cmp_embed_var.get(),
+                "comparison_metadata_fallback": self.cmp_metadata_fallback_var.get(),
             }
             for key, var in self.threshold_vars.items():
                 raw = var.get().strip()

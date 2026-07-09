@@ -19,6 +19,7 @@ class MatchingSettings:
     duplicate_embedding: bool = False
     comparison_chromaprint: bool = False
     comparison_embedding: bool = False
+    comparison_metadata_fallback: bool = False
     metadata_minimum_rating: float = 50.0
     audio_duplicate_threshold: float = 0.95
     audio_review_threshold: float = 0.85

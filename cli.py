@@ -426,7 +426,8 @@ def _print_matching_toggles(config: matching_settings_mod.MatchingSettings) -> N
     print_human(
         "Comparison phase: "
         f"chromaprint={_toggle_label(config.comparison_chromaprint)}, "
-        f"embedding={_toggle_label(config.comparison_embedding)}"
+        f"embedding={_toggle_label(config.comparison_embedding)}, "
+        f"metadata_fallback={_toggle_label(config.comparison_metadata_fallback)}"
     )
 
 
@@ -452,6 +453,7 @@ def cmd_set_audio_matching(args: argparse.Namespace) -> dict:
             "duplicate_embedding",
             "comparison_chromaprint",
             "comparison_embedding",
+            "comparison_metadata_fallback",
         ],
     )
     if not updates:
@@ -459,7 +461,8 @@ def cmd_set_audio_matching(args: argparse.Namespace) -> dict:
             "INVALID_ARGUMENT",
             "Provide at least one toggle: "
             "--duplicate-chromaprint, --duplicate-embedding, "
-            "--comparison-chromaprint, or --comparison-embedding (on/off).",
+            "--comparison-chromaprint, --comparison-embedding, "
+            "or --comparison-metadata-fallback (on/off).",
         )
     try:
         config = matching_settings_mod.update_matching_settings(**updates)
@@ -784,12 +787,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = subparsers.add_parser(
         "set-audio-matching",
-        help="Toggle chromaprint/embedding for duplicate and comparison phases.",
+        help="Toggle chromaprint/embedding/metadata fallback for duplicate and comparison phases.",
     )
     p.add_argument("--duplicate-chromaprint", choices=["on", "off"])
     p.add_argument("--duplicate-embedding", choices=["on", "off"])
     p.add_argument("--comparison-chromaprint", choices=["on", "off"])
     p.add_argument("--comparison-embedding", choices=["on", "off"])
+    p.add_argument("--comparison-metadata-fallback", choices=["on", "off"])
 
     p = subparsers.add_parser(
         "set-adopt-orphans",

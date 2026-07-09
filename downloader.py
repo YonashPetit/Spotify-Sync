@@ -35,8 +35,9 @@ def download_spotify_track(
     Run the full matching pipeline for a Spotify track.
 
     With chromaprint/embedding disabled the pipeline downloads the top heap
-    candidate when no ISRC hit exists; otherwise the best audio match wins,
-    falling back to the heap top.
+    candidate when no ISRC hit exists. With audio matching enabled, a
+    metadata-ranked fallback is used only when ``comparison_metadata_fallback``
+    is on and chromaprint/embedding do not find a satisfactory match.
     """
     global_settings = load_matching_settings()
     use_chromaprint = (
@@ -63,8 +64,12 @@ def download_spotify_track(
             certainty=result.audio_match_certainty,
         )
 
+    audio_enabled = use_chromaprint or use_embedding
+    allow_metadata_fallback = (
+        not audio_enabled or global_settings.comparison_metadata_fallback
+    )
     top = result.best_candidate
-    if top is not None:
+    if top is not None and allow_metadata_fallback:
         filename_base = build_track_filename(identity.title, save_directory)
         downloaded_path = download_audio(
             top.watch_url(),

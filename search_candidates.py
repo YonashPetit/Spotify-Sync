@@ -537,6 +537,32 @@ def _handle_direct_isrc_hit(
     )
 
 
+def _download_heap_top_candidate(
+    track: TrackInfo,
+    sorted_candidates: list[RankedCandidate],
+    *,
+    save_directory: Path,
+) -> PipelineResult:
+    """Download the top metadata-ranked heap candidate."""
+    top = sorted_candidates[0]
+    title, *_ = track
+    filename_base = build_track_filename(title, save_directory)
+    downloaded_path = download_audio(
+        top.watch_url(),
+        save_directory,
+        filename_base=filename_base,
+    )
+    return PipelineResult(
+        track=track,
+        direct_isrc_match=False,
+        downloaded_path=downloaded_path,
+        matched_video_id=top.video_id,
+        match_method="heap_top",
+        audio_match_certainty=None,
+        candidate_heap=sorted_candidates,
+    )
+
+
 def run_pipeline(
     spotify_link: str,
     *,
@@ -554,8 +580,10 @@ def run_pipeline(
     3. Otherwise search by artist/title one-by-one (up to max_candidates).
     4. On per-candidate ISRC metadata match: download and stop.
     5. Score remaining candidates; keep rating >= threshold in a max-heap.
-    6. If enabled, run chromaprint / embedding matchers on top candidates.
-    7. If audio matching is disabled (or finds nothing), download the heap top.
+    6. If enabled, run chromaprint then embedding on top candidates.
+    7. If audio matching is disabled, download the metadata-ranked heap top.
+    8. If audio matching is enabled and fails, download the heap top only when
+       ``comparison_metadata_fallback`` is on.
 
     ``enable_chromaprint`` / ``enable_embedding`` default to persisted
     comparison-phase toggles when left as None.
@@ -641,25 +669,24 @@ def run_pipeline(
                 candidate_heap=sorted_candidates,
             )
 
-    if sorted_candidates and not use_chromaprint and not use_embedding:
-        # Audio matching fully disabled: trust the metadata ranking and
-        # download the top-rated heap candidate.
-        top = sorted_candidates[0]
-        title, *_ = track
-        filename_base = build_track_filename(title, save_directory)
-        downloaded_path = download_audio(
-            top.watch_url(),
-            save_directory,
-            filename_base=filename_base,
-        )
+        if global_settings.comparison_metadata_fallback:
+            return _download_heap_top_candidate(
+                track, sorted_candidates, save_directory=save_directory
+            )
+
         return PipelineResult(
             track=track,
             direct_isrc_match=False,
-            downloaded_path=downloaded_path,
-            matched_video_id=top.video_id,
-            match_method="heap_top",
+            downloaded_path=None,
+            matched_video_id=None,
+            match_method=None,
             audio_match_certainty=None,
             candidate_heap=sorted_candidates,
+        )
+
+    if sorted_candidates:
+        return _download_heap_top_candidate(
+            track, sorted_candidates, save_directory=save_directory
         )
 
     return PipelineResult(

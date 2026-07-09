@@ -162,6 +162,7 @@ def gather_settings_overview() -> dict[str, Any]:
             "audio_matching_toggles": {
                 "comparison_chromaprint": global_matching.comparison_chromaprint,
                 "comparison_embedding": global_matching.comparison_embedding,
+                "comparison_metadata_fallback": global_matching.comparison_metadata_fallback,
             },
             "audio_matching_thresholds": {
                 "chromaprint_match_certainty": global_matching.chromaprint_match_certainty,
@@ -308,6 +309,11 @@ def print_settings_overview(data: dict[str, Any]) -> None:
     print_human("  Comparison phase audio matching:")
     _line("Chromaprint", _bool_label(cmp_audio["comparison_chromaprint"]), indent=2)
     _line("Vector embedding", _bool_label(cmp_audio["comparison_embedding"]), indent=2)
+    _line(
+        "Metadata fallback (last resort)",
+        _bool_label(cmp_audio["comparison_metadata_fallback"]),
+        indent=2,
+    )
     _line(
         "Chromaprint match certainty",
         audio_thresholds["chromaprint_match_certainty"],
