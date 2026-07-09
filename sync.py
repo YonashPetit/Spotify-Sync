@@ -461,12 +461,14 @@ def sync_playlist(playlist_id: int, *, json_mode: bool = False) -> SyncReport:
     save_directory.mkdir(parents=True, exist_ok=True)
     cover_path = _apply_playlist_cover(save_directory, playlist)
 
+    cleared, cleared_labels = reconcile_missing_playlist_files(
+        playlist_id=playlist_id,
+        library_id=library_id,
+        save_directory=save_directory,
+    )
     reconcile_report = ReconcileReport(
-        missing_links_cleared=reconcile_missing_playlist_files(
-            playlist_id=playlist_id,
-            library_id=library_id,
-            save_directory=save_directory,
-        )
+        missing_links_cleared=cleared,
+        cleared_track_labels=cleared_labels,
     )
     if settings.get_adopt_orphan_files():
         adopt_report = adopt_orphan_playlist_files(

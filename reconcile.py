@@ -9,7 +9,7 @@ from typing import Optional
 import db
 from isrc_match import normalize_isrc
 from models import ProcessResult, TrackIdentity
-from output import print_human
+from output import print_human, song_title
 from tracks import (
     FileTrackMetadata,
     iter_audio_files,
@@ -28,6 +28,7 @@ from tracks import (
 @dataclass
 class ReconcileReport:
     missing_links_cleared: int = 0
+    cleared_track_labels: list[str] = field(default_factory=list)
     orphans_adopted: int = 0
     orphans_unmatched: int = 0
     results: list[ProcessResult] = field(default_factory=list)
@@ -35,10 +36,19 @@ class ReconcileReport:
     def as_dict(self) -> dict:
         return {
             "missing_links_cleared": self.missing_links_cleared,
+            "cleared_track_labels": list(self.cleared_track_labels),
             "orphans_adopted": self.orphans_adopted,
             "orphans_unmatched": self.orphans_unmatched,
             "results": [result.as_dict() for result in self.results],
         }
+
+
+def _cleared_track_label(title_norm: Optional[str], artist_norm: Optional[str]) -> str:
+    title = song_title(title_norm or "")
+    artist = (artist_norm or "").strip()
+    if artist:
+        return f"{title} by {artist}"
+    return title
 
 
 def track_file_present(
@@ -66,16 +76,19 @@ def reconcile_missing_playlist_files(
     playlist_id: int,
     library_id: int,
     save_directory: Path,
-) -> int:
+) -> tuple[int, list[str]]:
     """
     Clear stale ``library_tracks`` rows when the recorded file is missing
     from the playlist folder so sync can re-download the track.
+
+    Returns ``(cleared_count, cleared_track_labels)``.
     """
     conn = db.get_connection()
     rows = conn.execute(
         """
-        SELECT pi.track_id, lt.local_path
+        SELECT pi.track_id, lt.local_path, t.title_norm, t.artist_norm
         FROM playlist_items pi
+        JOIN tracks t ON t.id = pi.track_id
         LEFT JOIN library_tracks lt
           ON lt.library_id = ? AND lt.track_id = pi.track_id
         WHERE pi.playlist_id = ? AND pi.removed_at IS NULL
@@ -84,6 +97,7 @@ def reconcile_missing_playlist_files(
     ).fetchall()
 
     cleared = 0
+    cleared_labels: list[str] = []
     for row in rows:
         local_path = row["local_path"]
         if not local_path:
@@ -93,12 +107,17 @@ def reconcile_missing_playlist_files(
             continue
         unlink_track_from_library(library_id, row["track_id"])
         cleared += 1
+        cleared_labels.append(
+            _cleared_track_label(row["title_norm"], row["artist_norm"])
+        )
 
     if cleared:
+        names = ", ".join(repr(label) for label in cleared_labels)
         print_human(
-            f"Cleared {cleared} stale database link(s) for missing playlist file(s)."
+            f"Cleared {cleared} stale database link(s) for missing playlist file(s): "
+            f"{names}."
         )
-    return cleared
+    return cleared, cleared_labels
 
 
 def _match_file_to_playlist_track(

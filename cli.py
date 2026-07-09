@@ -88,12 +88,20 @@ def _print_summary_human(summary: dict) -> None:
     )
     reconcile = summary.get("reconcile")
     if reconcile:
-        print_human(
+        cleared = reconcile.get("missing_links_cleared", 0)
+        cleared_labels = reconcile.get("cleared_track_labels") or []
+        reconcile_line = (
             "Reconcile: "
-            f"{reconcile.get('missing_links_cleared', 0)} stale link(s) cleared, "
-            f"{reconcile.get('orphans_adopted', 0)} orphan(s) adopted, "
+            f"{cleared} stale link(s) cleared"
+        )
+        if cleared_labels:
+            names = ", ".join(repr(label) for label in cleared_labels)
+            reconcile_line += f" ({names})"
+        reconcile_line += (
+            f", {reconcile.get('orphans_adopted', 0)} orphan(s) adopted, "
             f"{reconcile.get('orphans_unmatched', 0)} orphan(s) left unmatched."
         )
+        print_human(reconcile_line)
 
 
 def _resolve_track_identity(args: argparse.Namespace) -> tuple[TrackIdentity, Optional[str]]:
