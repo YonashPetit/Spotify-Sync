@@ -48,6 +48,7 @@ class DownloadOutcome:
     path: Path
     method: str
     certainty: float | None = None
+    video_id: str | None = None
 
 
 def download_spotify_track(
@@ -89,6 +90,7 @@ def download_spotify_track(
             path=result.downloaded_path,
             method=result.match_method or "unknown",
             certainty=result.audio_match_certainty,
+            video_id=result.matched_video_id,
         )
 
     audio_enabled = use_chromaprint or use_embedding
@@ -113,6 +115,7 @@ def download_spotify_track(
             path=downloaded_path,
             method="heap_top",
             certainty=None,
+            video_id=top.video_id,
         )
 
     raise DownloadError(
@@ -140,4 +143,9 @@ def download_youtube_track(
         save_directory,
         filename_base=filename_base,
     )
-    return DownloadOutcome(path=downloaded_path, method="youtube_direct", certainty=None)
+    return DownloadOutcome(
+        path=downloaded_path,
+        method="youtube_direct",
+        certainty=None,
+        video_id=video_id,
+    )

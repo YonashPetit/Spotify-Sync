@@ -242,6 +242,62 @@ def embed_metadata(path: Path, meta: TrackMetadata) -> None:
         _embed_generic(path, meta)
 
 
+def youtube_thumbnail_url(video_id: str) -> str:
+    return f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
+
+
+def metadata_from_exportify(
+    *,
+    title: str,
+    artist: str,
+    album: str = "",
+    year: Optional[int] = None,
+    track_number: Optional[int] = None,
+    isrc: Optional[str] = None,
+    youtube_video_id: Optional[str] = None,
+) -> TrackMetadata:
+    """Build tagging metadata from Exportify CSV fields plus a YouTube thumbnail."""
+    return TrackMetadata(
+        title=title,
+        artist=artist,
+        album=album,
+        year=year,
+        track_number=track_number,
+        isrc=isrc,
+        cover_url=(
+            youtube_thumbnail_url(youtube_video_id) if youtube_video_id else None
+        ),
+    )
+
+
+def tag_downloaded_file_from_exportify(
+    path: Path,
+    meta: TrackMetadata,
+    *,
+    youtube_video_id: Optional[str] = None,
+) -> bool:
+    """Tag a download using Exportify metadata and a YouTube thumbnail for cover art."""
+    try:
+        tagging = TrackMetadata(
+            title=meta.title,
+            artist=meta.artist,
+            album=meta.album,
+            genre=meta.genre,
+            year=meta.year,
+            track_number=meta.track_number,
+            isrc=meta.isrc,
+            cover_url=(
+                youtube_thumbnail_url(youtube_video_id)
+                if youtube_video_id
+                else meta.cover_url
+            ),
+        )
+        embed_metadata(path, tagging)
+        return True
+    except Exception:
+        return False
+
+
 def tag_downloaded_file(path: Path, identity: TrackIdentity) -> bool:
     """Best-effort tagging; never fails the download."""
     try:

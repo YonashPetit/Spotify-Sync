@@ -30,6 +30,8 @@ from cli import (
     cmd_list_blacklisted,
     cmd_login,
     cmd_enable_playlist,
+    cmd_import_exportify,
+    cmd_preview_exportify,
     cmd_remove_playlist,
     cmd_reset_connection,
     cmd_resolve_duplicate,
@@ -428,6 +430,52 @@ class GuiApp:
         ttk.Button(sync_btns, text="Remove selected", command=self._remove_playlist).pack(
             side=tk.LEFT, padx=6
         )
+
+        exportify_frame = ttk.LabelFrame(frame, text="Exportify CSV import", padding=8)
+        exportify_frame.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(12, 0))
+        exportify_frame.columnconfigure(1, weight=1)
+
+        self.exportify_csv_var = tk.StringVar()
+        ttk.Label(exportify_frame, text="CSV file:").grid(row=0, column=0, sticky=tk.W)
+        ttk.Entry(exportify_frame, textvariable=self.exportify_csv_var).grid(
+            row=0, column=1, sticky="ew", padx=(8, 8)
+        )
+        ttk.Button(
+            exportify_frame, text="Browse…", command=self._browse_exportify_csv
+        ).grid(row=0, column=2, sticky=tk.E)
+
+        self.exportify_name_var = tk.StringVar()
+        ttk.Label(exportify_frame, text="New playlist name:").grid(
+            row=1, column=0, sticky=tk.W, pady=(8, 0)
+        )
+        ttk.Entry(exportify_frame, textvariable=self.exportify_name_var).grid(
+            row=1, column=1, columnspan=2, sticky="ew", padx=(8, 0), pady=(8, 0)
+        )
+
+        self.exportify_mode_var = tk.StringVar(value="existing")
+        mode_row = ttk.Frame(exportify_frame)
+        mode_row.grid(row=2, column=0, columnspan=3, sticky=tk.W, pady=(8, 0))
+        ttk.Radiobutton(
+            mode_row,
+            text="Add to selected playlist",
+            variable=self.exportify_mode_var,
+            value="existing",
+        ).pack(side=tk.LEFT, padx=(0, 16))
+        ttk.Radiobutton(
+            mode_row,
+            text="Create standalone playlist",
+            variable=self.exportify_mode_var,
+            value="standalone",
+        ).pack(side=tk.LEFT)
+
+        exportify_btns = ttk.Frame(exportify_frame)
+        exportify_btns.grid(row=3, column=0, columnspan=3, sticky=tk.W, pady=(10, 0))
+        ttk.Button(
+            exportify_btns, text="Preview CSV", command=self._preview_exportify_csv
+        ).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(
+            exportify_btns, text="Import & download", command=self._import_exportify_csv
+        ).pack(side=tk.LEFT, padx=6)
 
         adopt_btns = ttk.Frame(btn_row)
         adopt_btns.pack(side=tk.RIGHT)
@@ -995,6 +1043,76 @@ class GuiApp:
                 )
             ),
         )
+
+    def _browse_exportify_csv(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Select Exportify CSV",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+        )
+        if path:
+            self.exportify_csv_var.set(path)
+            if not self.exportify_name_var.get().strip():
+                self.exportify_name_var.set(Path(path).stem)
+
+    def _preview_exportify_csv(self) -> None:
+        csv_path = self.exportify_csv_var.get().strip()
+        if not csv_path:
+            messagebox.showerror("Missing file", "Choose an Exportify CSV file.")
+            return
+        self._run_task(
+            "preview exportify csv",
+            lambda: cmd_preview_exportify(_ns(csv_file=csv_path, limit=25)),
+            refresh=False,
+        )
+
+    def _import_exportify_csv(self) -> None:
+        csv_path = self.exportify_csv_var.get().strip()
+        if not csv_path:
+            messagebox.showerror("Missing file", "Choose an Exportify CSV file.")
+            return
+
+        mode = self.exportify_mode_var.get()
+        playlist_id: Optional[int] = None
+        create_playlist = False
+        name = self.exportify_name_var.get().strip() or None
+
+        if mode == "existing":
+            ids = self._selected_playlist_ids()
+            if len(ids) != 1:
+                messagebox.showerror(
+                    "Select one playlist",
+                    "Select exactly one enabled playlist to import into.",
+                )
+                return
+            playlist_id = ids[0]
+            selected = next(
+                row for row in self._playlist_rows if row["playlist_id"] == playlist_id
+            )
+            if not selected["enabled"]:
+                messagebox.showerror(
+                    "Playlist disabled",
+                    "The selected playlist is disabled. Enable it before importing.",
+                )
+                return
+        else:
+            create_playlist = True
+            if not name:
+                name = Path(csv_path).stem or "Exportify Playlist"
+
+        def task() -> dict:
+            return cmd_import_exportify(
+                _ns(
+                    csv_file=csv_path,
+                    playlist_id=playlist_id,
+                    create_playlist=create_playlist,
+                    name=name,
+                    dest=None,
+                    library=None,
+                ),
+                json_mode=False,
+            )
+
+        self._run_task("import exportify csv", task)
 
     def _save_adopt_orphans_setting(self, *_args) -> None:
         settings.set_adopt_orphan_files(bool(self.adopt_orphans_var.get()))

@@ -33,7 +33,7 @@ from output import (
 )
 from playlists import PlaylistNotFoundError
 from sources import spotify_source, youtube_source
-from tracks import get_or_create_track, get_track_identity
+from exportify import default_playlist_name, import_exportify_csv, parse_exportify_csv
 
 EXIT_OK = 0
 EXIT_VALIDATION = 2
@@ -363,6 +363,56 @@ def cmd_add_playlist(args: argparse.Namespace) -> dict:
         "folder_existed": folder_existed,
         "cover_path": cover_path,
     }
+
+
+def cmd_import_exportify(args: argparse.Namespace, json_mode: bool) -> dict:
+    log_operation_start("import-exportify")
+    csv_path = Path(args.csv_file).expanduser()
+    if not csv_path.is_file():
+        raise CliError("CSV_FILE_NOT_FOUND", f"Exportify CSV not found: {csv_path}")
+
+    library_id = libraries.resolve_library(dest=args.dest, library_name=args.library)
+
+    if bool(args.playlist_id is not None) == bool(args.create_playlist):
+        raise CliError(
+            "INVALID_ARGUMENT",
+            "Provide exactly one of --playlist-id or --create-playlist.",
+        )
+
+    create_name: Optional[str] = None
+    if args.create_playlist:
+        create_name = (args.name or "").strip() or default_playlist_name(csv_path)
+
+    try:
+        data = import_exportify_csv(
+            csv_path,
+            library_id=library_id,
+            playlist_id=args.playlist_id,
+            create_playlist_name=create_name,
+            json_mode=json_mode,
+        )
+    except ValueError as exc:
+        raise CliError("INVALID_ARGUMENT", str(exc)) from exc
+
+    _print_summary_human(data["summary"])
+    log_operation_success("import-exportify")
+    return data
+
+
+def cmd_preview_exportify(args: argparse.Namespace) -> dict:
+    log_operation_start("preview-exportify")
+    csv_path = Path(args.csv_file).expanduser()
+    rows = parse_exportify_csv(csv_path)
+    for index, row in enumerate(rows[: args.limit], start=1):
+        print_human(
+            f"{index}. {row.artist_names!r} - {row.track_name!r} "
+            f"(album={row.album_name!r}, isrc={row.isrc or 'n/a'})"
+        )
+    if len(rows) > args.limit:
+        print_human(f"... and {len(rows) - args.limit} more track(s).")
+    print_human(f"Total: {len(rows)} track(s) in {csv_path.name}.")
+    log_operation_success("preview-exportify")
+    return {"csv_file": str(csv_path), "track_count": len(rows)}
 
 
 def cmd_add_track(args: argparse.Namespace, json_mode: bool) -> dict:
@@ -837,6 +887,35 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dest")
     p.add_argument("--library")
 
+    p = subparsers.add_parser(
+        "import-exportify",
+        help="Import tracks from an Exportify CSV export.",
+    )
+    p.add_argument("--csv-file", required=True, help="Path to the Exportify CSV file.")
+    p.add_argument(
+        "--playlist-id",
+        type=int,
+        help="Add tracks to an existing enabled playlist.",
+    )
+    p.add_argument(
+        "--create-playlist",
+        action="store_true",
+        help="Create a standalone exportify playlist from the CSV.",
+    )
+    p.add_argument(
+        "--name",
+        help="Playlist name when using --create-playlist (defaults to CSV filename).",
+    )
+    p.add_argument("--dest")
+    p.add_argument("--library")
+
+    p = subparsers.add_parser(
+        "preview-exportify",
+        help="List tracks parsed from an Exportify CSV without downloading.",
+    )
+    p.add_argument("--csv-file", required=True)
+    p.add_argument("--limit", type=int, default=20)
+
     subparsers.add_parser(
         "list-playlists", help="List all playlists currently being tracked."
     )
@@ -972,6 +1051,10 @@ def dispatch(args: argparse.Namespace, json_mode: bool) -> dict:
         return cmd_set_cookies(args)
     if args.command == "add-playlist":
         return cmd_add_playlist(args)
+    if args.command == "import-exportify":
+        return cmd_import_exportify(args, json_mode)
+    if args.command == "preview-exportify":
+        return cmd_preview_exportify(args)
     if args.command == "list-playlists":
         return cmd_list_playlists(args)
     if args.command == "show-settings":

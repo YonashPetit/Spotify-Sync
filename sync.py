@@ -15,7 +15,7 @@ import settings
 from blacklist import is_blacklisted
 from downloader import download_spotify_track, download_youtube_track
 from duplicates import apply_duplicate_policy, find_duplicate_in_directory
-from metadata import save_playlist_cover, tag_downloaded_file
+from metadata import save_playlist_cover, tag_downloaded_file, tag_downloaded_file_from_exportify, TrackMetadata
 from models import DuplicateConfig, DuplicateResult, ProcessResult, TrackIdentity
 from output import (
     log_download_retry,
@@ -37,6 +37,8 @@ from tracks import (
     get_or_create_track,
     link_track_to_library,
     link_track_to_playlist,
+    list_playlist_member_tracks,
+    track_identity_from_member_row,
 )
 
 # Pause briefly between songs to reduce YouTube / yt-dlp rate-limit hits.
@@ -61,7 +63,13 @@ def describe_match_reason(method: str, certainty: Optional[float]) -> str:
     return label
 
 
+def _is_exportify_playlist(playlist: dict) -> bool:
+    return str(playlist.get("external_id") or "").startswith("exportify:")
+
+
 def _fetch_playlist_metadata(playlist: dict) -> dict:
+    if _is_exportify_playlist(playlist):
+        return {"name": playlist.get("name"), "external_id": playlist["external_id"]}
     if playlist["source"] == "spotify":
         return spotify_source.fetch_playlist_metadata(playlist["external_id"])
     return youtube_source.fetch_playlist_metadata(
@@ -150,6 +158,7 @@ def download_track(
     *,
     save_directory: Path,
     source_url: Optional[str] = None,
+    exportify_meta: Optional[TrackMetadata] = None,
 ) -> tuple[Path, str, Optional[float]]:
     if identity.spotify_track_id:
         url = source_url or spotify_source.track_url(identity.spotify_track_id)
@@ -163,7 +172,14 @@ def download_track(
         )
 
     local_path = outcome.path
-    tag_downloaded_file(local_path, identity)
+    if exportify_meta is not None:
+        tag_downloaded_file_from_exportify(
+            local_path,
+            exportify_meta,
+            youtube_video_id=outcome.video_id,
+        )
+    else:
+        tag_downloaded_file(local_path, identity)
     return local_path, outcome.method, outcome.certainty
 
 
@@ -203,6 +219,7 @@ def process_track_for_playlist(
     source_url: Optional[str] = None,
     retry: bool = False,
     log_events: bool = True,
+    exportify_meta: Optional[TrackMetadata] = None,
 ) -> ProcessResult:
     try:
         return _process_track_for_playlist_impl(
@@ -215,6 +232,7 @@ def process_track_for_playlist(
             source_url=source_url,
             retry=retry,
             log_events=log_events,
+            exportify_meta=exportify_meta,
         )
     except Exception as exc:  # noqa: BLE001 - report failure per track
         rate_limits.note_exception(
@@ -249,6 +267,7 @@ def _process_track_for_playlist_impl(
     source_url: Optional[str] = None,
     retry: bool = False,
     log_events: bool = True,
+    exportify_meta: Optional[TrackMetadata] = None,
 ) -> ProcessResult:
     track_id = get_or_create_track(identity)
 
@@ -340,7 +359,10 @@ def _process_track_for_playlist_impl(
 
     try:
         local_path, match_method, match_certainty = download_track(
-            identity, save_directory=save_directory, source_url=source_url
+            identity,
+            save_directory=save_directory,
+            source_url=source_url,
+            exportify_meta=exportify_meta,
         )
     except Exception as exc:  # noqa: BLE001 - report failure per track
         result = ProcessResult(
@@ -385,6 +407,22 @@ def _remove_existing_track(library_id: int, duplicate: DuplicateResult) -> None:
         (library_id, duplicate.existing_track_id),
     )
     conn.commit()
+
+
+def _iter_exportify_identity_batches(
+    playlist_id: int,
+    *,
+    batch_size: int = PLAYLIST_PAGE_SIZE,
+) -> Iterator[list[TrackIdentity]]:
+    members = list_playlist_member_tracks(playlist_id)
+    batch: list[TrackIdentity] = []
+    for row in members:
+        batch.append(track_identity_from_member_row(row))
+        if len(batch) >= batch_size:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
 
 
 def _iter_source_identity_batches(
@@ -502,7 +540,11 @@ def sync_playlist(playlist_id: int, *, json_mode: bool = False) -> SyncReport:
     total_items_seen = 0
     batch_number = 0
 
-    batch_iter = _iter_source_identity_batches(playlist)
+    batch_iter = (
+        _iter_exportify_identity_batches(playlist_id)
+        if _is_exportify_playlist(playlist)
+        else _iter_source_identity_batches(playlist)
+    )
     while True:
         try:
             batch = next(batch_iter)
@@ -552,15 +594,16 @@ def sync_playlist(playlist_id: int, *, json_mode: bool = False) -> SyncReport:
                 results.append(result)
                 _pause_between_songs()
 
-    removed = previously_active - seen_track_ids
-    if removed:
-        now = _utc_now()
-        conn.executemany(
-            "UPDATE playlist_items SET removed_at = ? "
-            "WHERE playlist_id = ? AND track_id = ?",
-            [(now, playlist_id, track_id) for track_id in removed],
-        )
-        conn.commit()
+    if not _is_exportify_playlist(playlist):
+        removed = previously_active - seen_track_ids
+        if removed:
+            now = _utc_now()
+            conn.executemany(
+                "UPDATE playlist_items SET removed_at = ? "
+                "WHERE playlist_id = ? AND track_id = ?",
+                [(now, playlist_id, track_id) for track_id in removed],
+            )
+            conn.commit()
 
     return SyncReport(
         playlist_id=playlist_id,
