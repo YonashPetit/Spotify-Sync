@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Optional
 
 from get_content import parse_spotify_track_id
+from job_control import SyncStopped, check_stop, clear_stop
 from libraries import sanitize_dir_name
 from metadata import TrackMetadata, save_playlist_cover
 from models import ProcessResult, TrackIdentity
@@ -256,7 +257,15 @@ def import_exportify_csv(
         )
 
     results: list[ProcessResult] = []
+    clear_stop()
+    stopped = False
     for index, row in enumerate(rows, start=1):
+        try:
+            check_stop("exportify import")
+        except SyncStopped as exc:
+            stopped = True
+            print_human(str(exc))
+            break
         identity = identity_from_row(row)
         exportify_meta = metadata_from_row(row)
         print_human(
@@ -277,6 +286,8 @@ def import_exportify_csv(
         _pause_between_songs()
 
     summary = sync_mod.summarize_results(results, len(rows))
+    if stopped:
+        print_human("Exportify import interrupted — completed songs are kept.")
     print_human(
         "Import summary: "
         f"{summary['total_items_seen']} seen, "
@@ -298,4 +309,5 @@ def import_exportify_csv(
         "track_count": len(rows),
         "results": [result.as_dict() for result in results],
         "summary": summary,
+        "stopped": stopped,
     }

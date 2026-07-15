@@ -15,6 +15,7 @@ import settings
 from blacklist import is_blacklisted
 from downloader import download_spotify_track, download_youtube_track
 from duplicates import apply_duplicate_policy, find_duplicate_in_directory
+from job_control import SyncStopped, check_stop, stop_requested
 from metadata import save_playlist_cover, tag_downloaded_file, tag_downloaded_file_from_exportify, TrackMetadata
 from models import DuplicateConfig, DuplicateResult, ProcessResult, TrackIdentity
 from output import (
@@ -500,12 +501,15 @@ def summarize_results(
 
 def sync_playlist(playlist_id: int, *, json_mode: bool = False) -> SyncReport:
     playlist = playlists_mod.get_playlist(playlist_id)
+    playlist_label = playlist["name"] or playlist["external_id"]
     library_id = playlist["library_id"]
     config = playlists_mod.playlist_duplicate_config(playlist_id)
     save_directory = libraries.playlist_dir(
         library_id, playlist["name"] or playlist["external_id"], playlist["external_id"]
     )
     save_directory.mkdir(parents=True, exist_ok=True)
+
+    check_stop(f"sync of {playlist_label!r}")
     cover_path = _apply_playlist_cover(save_directory, playlist)
 
     cleared, cleared_labels = reconcile_missing_playlist_files(
@@ -518,6 +522,7 @@ def sync_playlist(playlist_id: int, *, json_mode: bool = False) -> SyncReport:
         cleared_track_labels=cleared_labels,
     )
     if settings.get_adopt_orphan_files():
+        check_stop(f"orphan adoption for {playlist_label!r}")
         adopt_report = adopt_orphan_playlist_files(
             playlist_id=playlist_id,
             library_id=library_id,
@@ -544,62 +549,74 @@ def sync_playlist(playlist_id: int, *, json_mode: bool = False) -> SyncReport:
             seen_track_ids.add(result.track_id)
     total_items_seen = 0
     batch_number = 0
+    stopped = False
 
     batch_iter = (
         _iter_exportify_identity_batches(playlist_id)
         if _is_exportify_playlist(playlist)
         else _iter_source_identity_batches(playlist)
     )
-    while True:
-        try:
-            batch = next(batch_iter)
-        except StopIteration:
-            break
-        except Exception as exc:  # noqa: BLE001 - keep partial progress
-            rate_limits.note_exception(exc, operation="playlist pagination")
+    try:
+        while True:
+            check_stop(f"sync of {playlist_label!r}")
+            try:
+                batch = next(batch_iter)
+            except StopIteration:
+                break
+            except Exception as exc:  # noqa: BLE001 - keep partial progress
+                rate_limits.note_exception(exc, operation="playlist pagination")
+                print_human(
+                    f"Playlist pagination stopped early: {exc}. "
+                    "Completed songs are saved; re-run sync to continue."
+                )
+                break
+
+            if not batch:
+                continue
+
+            batch_number += 1
+            batch_start = total_items_seen + 1
+            batch_end = total_items_seen + len(batch)
             print_human(
-                f"Playlist pagination stopped early: {exc}. "
-                "Completed songs are saved; re-run sync to continue."
+                f"Syncing playlist page {batch_number} "
+                f"({len(batch)} track(s), items {batch_start}–{batch_end})…"
             )
-            break
 
-        if not batch:
-            continue
+            for identity in batch:
+                check_stop(f"sync of {playlist_label!r}")
+                total_items_seen += 1
+                track_id: Optional[int] = None
+                result: Optional[ProcessResult] = None
+                try:
+                    track_id = get_or_create_track(identity)
+                    seen_track_ids.add(track_id)
 
-        batch_number += 1
-        batch_start = total_items_seen + 1
-        batch_end = total_items_seen + len(batch)
+                    if not track_file_present(library_id, track_id, save_directory):
+                        result = process_track_for_playlist(
+                            playlist_id=playlist_id,
+                            identity=identity,
+                            save_directory=save_directory,
+                            library_id=library_id,
+                            config=config,
+                            json_mode=json_mode,
+                            source_url=_source_url_for_identity(identity),
+                        )
+                except SyncStopped:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - report failure per track
+                    result = _failed_sync_result(identity, track_id, exc)
+
+                if result is not None:
+                    results.append(result)
+                    _pause_between_songs()
+    except SyncStopped as exc:
+        stopped = True
+        print_human(str(exc))
         print_human(
-            f"Syncing playlist page {batch_number} "
-            f"({len(batch)} track(s), items {batch_start}–{batch_end})…"
+            f"Sync of {playlist_label!r} interrupted — completed songs are kept."
         )
 
-        for identity in batch:
-            total_items_seen += 1
-            track_id: Optional[int] = None
-            result: Optional[ProcessResult] = None
-            try:
-                track_id = get_or_create_track(identity)
-                seen_track_ids.add(track_id)
-
-                if not track_file_present(library_id, track_id, save_directory):
-                    result = process_track_for_playlist(
-                        playlist_id=playlist_id,
-                        identity=identity,
-                        save_directory=save_directory,
-                        library_id=library_id,
-                        config=config,
-                        json_mode=json_mode,
-                        source_url=_source_url_for_identity(identity),
-                    )
-            except Exception as exc:  # noqa: BLE001 - report failure per track
-                result = _failed_sync_result(identity, track_id, exc)
-
-            if result is not None:
-                results.append(result)
-                _pause_between_songs()
-
-    if not _is_exportify_playlist(playlist):
+    if not stopped and not _is_exportify_playlist(playlist):
         removed = previously_active - seen_track_ids
         # Local-only adoptees (no Spotify/YouTube id) stay on the playlist
         # even though they are absent from the remote catalog.
@@ -637,11 +654,17 @@ def sync_all(*, json_mode: bool = False) -> dict[int, SyncReport]:
     for playlist in playlists_mod.list_playlists():
         if not playlist["enabled"]:
             continue
+        if stop_requested():
+            print_human("Stop requested — remaining playlists were not synced.")
+            break
         playlist_id = playlist["playlist_id"]
         try:
             all_results[playlist_id] = sync_playlist(
                 playlist_id, json_mode=json_mode
             )
+        except SyncStopped as exc:
+            print_human(str(exc))
+            break
         except Exception as exc:  # noqa: BLE001 - continue other playlists
             name = playlist["name"] or playlist["external_id"]
             print_human(

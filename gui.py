@@ -33,7 +33,6 @@ from cli import (
     cmd_import_exportify,
     cmd_preview_exportify,
     cmd_remove_playlist,
-    cmd_reset_connection,
     cmd_resolve_duplicate,
     cmd_unset_playlist,
     cmd_select_download_path,
@@ -229,7 +228,7 @@ class GuiApp:
             side=tk.LEFT, padx=(0, 8)
         )
         ttk.Button(
-            log_controls, text="Reset connection", command=self._reset_connection
+            log_controls, text="Stop sync", command=self._stop_sync
         ).pack(side=tk.LEFT)
 
     def _labeled_entry(
@@ -419,6 +418,9 @@ class GuiApp:
             side=tk.LEFT, padx=(0, 6)
         )
         ttk.Button(sync_btns, text="Sync all enabled", command=self._sync_all).pack(
+            side=tk.LEFT, padx=6
+        )
+        ttk.Button(sync_btns, text="Stop sync", command=self._stop_sync).pack(
             side=tk.LEFT, padx=6
         )
         ttk.Button(sync_btns, text="Disable selected", command=self._disable_playlist).pack(
@@ -712,12 +714,15 @@ class GuiApp:
         self.log_text.delete("1.0", tk.END)
         self.log_text.configure(state=tk.DISABLED)
 
-    def _reset_connection(self) -> None:
-        self._run_task(
-            "reset connection",
-            lambda: cmd_reset_connection(_ns()),
-            refresh=False,
+    def _stop_sync(self) -> None:
+        """Interrupt a running sync/import without waiting for _run_task."""
+        import job_control
+
+        path = job_control.request_stop()
+        self._append_log(
+            "Stop requested — current sync/import will halt after this song."
         )
+        self._append_log(f"Stop flag: {path}")
 
     def _route_mousewheel(self, event: tk.Event) -> None:
         hovered = self.root.winfo_containing(
@@ -796,6 +801,9 @@ class GuiApp:
         self._append_log(f"--- {label} ---")
 
         def worker() -> None:
+            import job_control
+
+            job_control.clear_stop()
             try:
                 with self._capture_output():
                     fn()
@@ -805,6 +813,7 @@ class GuiApp:
                 if not isinstance(exc, CliError):
                     self._log_queue.put(traceback.format_exc())
             finally:
+                job_control.clear_stop()
                 self._log_queue.put(f"--- done: {label} ---")
                 self.root.after(0, lambda: self._finish_task(refresh))
 

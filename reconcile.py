@@ -9,6 +9,7 @@ from typing import Optional
 
 import db
 from isrc_match import normalize_isrc
+from job_control import SyncStopped, check_stop
 from models import ProcessResult, TrackIdentity
 from output import print_human, song_title
 from tracks import (
@@ -452,6 +453,7 @@ def adopt_orphan_playlist_files(
     skipped_duplicates = 0
 
     for path in orphans:
+        check_stop("orphan adoption")
         metadata = read_file_track_metadata(path)
         if not metadata.title.strip():
             report.orphans_unmatched += 1

@@ -636,15 +636,24 @@ def cmd_show_settings(args: argparse.Namespace) -> dict:
     return overview
 
 
-def cmd_reset_connection(args: argparse.Namespace) -> dict:
-    log_operation_start("reset-connection")
-    result = rate_limits.reset_for_sync()
-    log_operation_success("reset-connection")
-    return result
+def cmd_stop_sync(args: argparse.Namespace) -> dict:
+    import job_control
+
+    log_operation_start("stop-sync")
+    path = job_control.request_stop()
+    print_human(
+        "Stop requested. Any running sync/import will halt after the current song."
+    )
+    print_human(f"Stop flag: {path}")
+    log_operation_success("stop-sync")
+    return {"stop_requested": True, "stop_flag": str(path)}
 
 
 def cmd_sync(args: argparse.Namespace, json_mode: bool) -> dict:
+    import job_control
+
     log_operation_start("sync")
+    job_control.clear_stop()
     if bool(args.all) == (args.playlist_id is not None):
         raise CliError("INVALID_ARGUMENT", "Provide exactly one of --playlist-id or --all.")
 
@@ -663,6 +672,7 @@ def cmd_sync(args: argparse.Namespace, json_mode: bool) -> dict:
             "playlist_id": report.playlist_id,
             "results": results,
             "summary": report.summary,
+            "stopped": job_control.stop_requested(),
         }
         if report.reconcile is not None:
             data["reconcile"] = report.reconcile.as_dict()
@@ -670,46 +680,57 @@ def cmd_sync(args: argparse.Namespace, json_mode: bool) -> dict:
             data["decision_requests"] = decision_requests
         return data
 
-    if args.playlist_id is not None:
-        playlist = playlists_mod.get_playlist(args.playlist_id)
-        if not playlist["enabled"]:
-            name = playlist["name"] or playlist["external_id"]
-            raise CliError(
-                "PLAYLIST_DISABLED",
-                f"Playlist {name!r} (id={args.playlist_id}) cannot be synced: "
-                "this song was unset/disabled.",
-            )
-        playlist_name = playlist["name"] or playlist["external_id"]
-        print_human(f"Syncing playlist {playlist_name!r} (id={args.playlist_id}).")
-        report = sync_mod.sync_playlist(args.playlist_id, json_mode=json_mode)
-        _print_summary_human(report.summary)
-        log_operation_success("sync")
-        return report_to_data(report)
+    try:
+        if args.playlist_id is not None:
+            playlist = playlists_mod.get_playlist(args.playlist_id)
+            if not playlist["enabled"]:
+                name = playlist["name"] or playlist["external_id"]
+                raise CliError(
+                    "PLAYLIST_DISABLED",
+                    f"Playlist {name!r} (id={args.playlist_id}) cannot be synced: "
+                    "this song was unset/disabled.",
+                )
+            playlist_name = playlist["name"] or playlist["external_id"]
+            print_human(f"Syncing playlist {playlist_name!r} (id={args.playlist_id}).")
+            report = sync_mod.sync_playlist(args.playlist_id, json_mode=json_mode)
+            _print_summary_human(report.summary)
+            if job_control.stop_requested():
+                print_human("Sync stopped by request.")
+            log_operation_success("sync")
+            return report_to_data(report)
 
-    print_human("Syncing all enabled playlists.")
-    all_reports = sync_mod.sync_all(json_mode=json_mode)
-    playlists_data = []
-    aggregate = {
-        "total_items_seen": 0,
-        "new_items_processed": 0,
-        "downloaded": 0,
-        "skipped_duplicate": 0,
-        "skipped_blacklisted": 0,
-        "needs_user_choice": 0,
-        "failed": 0,
-        "already_present": 0,
-        "adopted": 0,
-    }
-    for playlist_id, report in all_reports.items():
-        playlist = playlists_mod.get_playlist(playlist_id)
-        playlist_name = playlist["name"] or playlist["external_id"]
-        print_human(f"Finished playlist {playlist_name!r} (id={playlist_id}).")
-        _print_summary_human(report.summary)
-        playlists_data.append(report_to_data(report))
-        for key in aggregate:
-            aggregate[key] += report.summary[key]
-    log_operation_success("sync")
-    return {"playlists": playlists_data, "summary": aggregate}
+        print_human("Syncing all enabled playlists.")
+        all_reports = sync_mod.sync_all(json_mode=json_mode)
+        playlists_data = []
+        aggregate = {
+            "total_items_seen": 0,
+            "new_items_processed": 0,
+            "downloaded": 0,
+            "skipped_duplicate": 0,
+            "skipped_blacklisted": 0,
+            "needs_user_choice": 0,
+            "failed": 0,
+            "already_present": 0,
+            "adopted": 0,
+        }
+        for playlist_id, report in all_reports.items():
+            playlist = playlists_mod.get_playlist(playlist_id)
+            playlist_name = playlist["name"] or playlist["external_id"]
+            print_human(f"Finished playlist {playlist_name!r} (id={playlist_id}).")
+            _print_summary_human(report.summary)
+            playlists_data.append(report_to_data(report))
+            for key in aggregate:
+                aggregate[key] += report.summary[key]
+        if job_control.stop_requested():
+            print_human("Sync stopped by request.")
+        log_operation_success("sync")
+        return {
+            "playlists": playlists_data,
+            "summary": aggregate,
+            "stopped": job_control.stop_requested(),
+        }
+    finally:
+        job_control.clear_stop()
 
 
 def cmd_blacklist_song(args: argparse.Namespace) -> dict:
@@ -992,8 +1013,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dest")
 
     subparsers.add_parser(
-        "reset-connection",
-        help="Reset the database connection and clear recorded rate-limit hits.",
+        "stop-sync",
+        help=(
+            "Request that a running sync/import stop after the current song. "
+            "Works across processes via a stop flag in the app data folder."
+        ),
     )
 
     p = subparsers.add_parser("sync", help="Sync tracked playlists.")
@@ -1059,8 +1083,8 @@ def dispatch(args: argparse.Namespace, json_mode: bool) -> dict:
         return cmd_list_playlists(args)
     if args.command == "show-settings":
         return cmd_show_settings(args)
-    if args.command == "reset-connection":
-        return cmd_reset_connection(args)
+    if args.command == "stop-sync":
+        return cmd_stop_sync(args)
     if args.command == "set-audio-matching":
         return cmd_set_audio_matching(args)
     if args.command == "set-adopt-orphans":
