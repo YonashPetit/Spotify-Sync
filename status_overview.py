@@ -186,7 +186,8 @@ def gather_settings_overview() -> dict[str, Any]:
             "description": (
                 "Before downloading, reconcile playlist folders with the database. "
                 "Missing files clear stale links so they can be re-downloaded. "
-                "When adopt is on, orphan files may be linked to playlist tracks."
+                "When adopt is on, audio files in the folder that are not in the "
+                "database are registered as playlist tracks from local metadata."
             ),
         },
         "stats": {

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import re
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,6 +17,7 @@ from search_candidates import _normalize_text
 
 _AUDIO_EXTENSIONS = {".m4a", ".mp3", ".flac", ".opus", ".ogg", ".webm"}
 _LEGACY_ISRC_STEM_RE = re.compile(r"^([A-Z0-9]{12})(?:_|$)")
+_DUPLICATE_STEM_SUFFIX = re.compile(r"\s\(\d+\)$")
 
 
 @dataclass(frozen=True)
@@ -22,18 +25,104 @@ class FileTrackMetadata:
     title: str
     artist: str
     isrc: Optional[str]
+    duration_seconds: int = 0
+
+
+def _prepare_normalize(value: str) -> str:
+    return unicodedata.normalize("NFC", value.strip())
 
 
 def normalize_title(value: str) -> str:
-    return _normalize_text(value)
+    return _normalize_text(_prepare_normalize(value))
 
 
 def normalize_artist(value: str) -> str:
-    return _normalize_text(value)
+    return _normalize_text(_prepare_normalize(value))
+
+
+def existing_track_id_for_identity(identity: TrackIdentity) -> Optional[int]:
+    """Return an existing ``tracks.id`` for this identity, if any."""
+    conn = db.get_connection()
+    if identity.spotify_track_id:
+        row = conn.execute(
+            "SELECT id FROM tracks WHERE spotify_track_id = ?",
+            (identity.spotify_track_id,),
+        ).fetchone()
+        if row is not None:
+            return int(row["id"])
+    if identity.youtube_video_id:
+        row = conn.execute(
+            "SELECT id FROM tracks WHERE youtube_video_id = ?",
+            (identity.youtube_video_id,),
+        ).fetchone()
+        if row is not None:
+            return int(row["id"])
+    if identity.isrc:
+        isrc = normalize_isrc(identity.isrc)
+        row = conn.execute(
+            "SELECT id FROM tracks WHERE isrc = ?",
+            (isrc,),
+        ).fetchone()
+        if row is not None:
+            return int(row["id"])
+    return None
+
+
+def list_unlinked_tracks_for_library(library_id: int) -> list[dict]:
+    """Tracks with no ``library_tracks`` row for *library_id*."""
+    conn = db.get_connection()
+    rows = conn.execute(
+        """
+        SELECT
+          t.id AS track_id,
+          t.spotify_track_id,
+          t.youtube_video_id,
+          t.isrc,
+          t.title_norm,
+          t.artist_norm,
+          t.duration_seconds
+        FROM tracks t
+        WHERE NOT EXISTS (
+            SELECT 1 FROM library_tracks lt
+            WHERE lt.library_id = ? AND lt.track_id = t.id
+        )
+        """,
+        (library_id,),
+    ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def update_track(track_id: int, identity: TrackIdentity) -> None:
+    """Write identity fields onto an existing ``tracks`` row."""
+    conn = db.get_connection()
+    isrc = normalize_isrc(identity.isrc) if identity.isrc else None
+    duration = identity.duration_seconds if identity.duration_seconds > 0 else None
+    conn.execute(
+        """
+        UPDATE tracks SET
+          spotify_track_id = COALESCE(spotify_track_id, ?),
+          youtube_video_id = COALESCE(youtube_video_id, ?),
+          isrc = COALESCE(?, isrc),
+          title_norm = ?,
+          artist_norm = ?,
+          duration_seconds = COALESCE(?, duration_seconds)
+        WHERE id = ?
+        """,
+        (
+            identity.spotify_track_id,
+            identity.youtube_video_id,
+            isrc,
+            normalize_title(identity.title),
+            normalize_artist(identity.artist),
+            duration,
+            track_id,
+        ),
+    )
+    conn.commit()
 
 
 def get_or_create_track(identity: TrackIdentity) -> int:
@@ -51,33 +140,18 @@ def get_or_create_track(identity: TrackIdentity) -> int:
         ).fetchone()
 
     isrc = normalize_isrc(identity.isrc) if identity.isrc else None
+    if row is None and isrc:
+        row = conn.execute(
+            "SELECT id FROM tracks WHERE isrc = ?",
+            (isrc,),
+        ).fetchone()
+
     title_norm = normalize_title(identity.title)
     artist_norm = normalize_artist(identity.artist)
 
     if row is not None:
-        track_id = row["id"]
-        conn.execute(
-            """
-            UPDATE tracks SET
-              spotify_track_id = COALESCE(spotify_track_id, ?),
-              youtube_video_id = COALESCE(youtube_video_id, ?),
-              isrc = COALESCE(?, isrc),
-              title_norm = ?,
-              artist_norm = ?,
-              duration_seconds = ?
-            WHERE id = ?
-            """,
-            (
-                identity.spotify_track_id,
-                identity.youtube_video_id,
-                isrc,
-                title_norm,
-                artist_norm,
-                identity.duration_seconds,
-                track_id,
-            ),
-        )
-        conn.commit()
+        track_id = int(row["id"])
+        update_track(track_id, identity)
         return track_id
 
     cursor = conn.execute(
@@ -180,6 +254,27 @@ def list_playlist_member_tracks(playlist_id: int) -> list[dict]:
     return [dict(row) for row in rows]
 
 
+def normalize_path_key(path: Path | str) -> str:
+    """Case-insensitive path key for orphan / linked comparisons."""
+    resolved = Path(path).expanduser().resolve()
+    key = str(resolved)
+    if os.name == "nt":
+        return key.casefold()
+    return key
+
+
+def linked_path_keys_for_library(library_id: int) -> set[str]:
+    conn = db.get_connection()
+    return {
+        normalize_path_key(row["local_path"])
+        for row in conn.execute(
+            "SELECT local_path FROM library_tracks WHERE library_id = ?",
+            (library_id,),
+        ).fetchall()
+        if row["local_path"]
+    }
+
+
 def linked_paths_for_library(library_id: int) -> set[Path]:
     conn = db.get_connection()
     return {
@@ -194,6 +289,7 @@ def linked_paths_for_library(library_id: int) -> set[Path]:
 def read_file_track_metadata(path: Path) -> FileTrackMetadata:
     title = ""
     artist = ""
+    duration_seconds = 0
     try:
         if path.suffix.lower() in (".m4a", ".mp4"):
             from mutagen.mp4 import MP4
@@ -205,6 +301,8 @@ def read_file_track_metadata(path: Path) -> FileTrackMetadata:
             artists = audio.get("\xa9ART")
             if artists:
                 artist = str(artists[0])
+            if audio.info and getattr(audio.info, "length", None):
+                duration_seconds = int(audio.info.length)
         else:
             import mutagen
 
@@ -216,15 +314,19 @@ def read_file_track_metadata(path: Path) -> FileTrackMetadata:
                 artist_val = audio.tags.get("artist")
                 if artist_val:
                     artist = artist_val[0]
+            if audio and audio.info and getattr(audio.info, "length", None):
+                duration_seconds = int(audio.info.length)
     except Exception:
         pass
 
     if not title.strip():
-        title = path.stem
+        stem = _DUPLICATE_STEM_SUFFIX.sub("", path.stem).strip() or path.stem
+        title = unicodedata.normalize("NFC", stem)
     return FileTrackMetadata(
         title=title.strip(),
         artist=artist.strip(),
         isrc=read_file_isrc(path),
+        duration_seconds=max(0, duration_seconds),
     )
 
 

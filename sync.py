@@ -522,6 +522,7 @@ def sync_playlist(playlist_id: int, *, json_mode: bool = False) -> SyncReport:
             playlist_id=playlist_id,
             library_id=library_id,
             save_directory=save_directory,
+            playlist=playlist,
         )
         reconcile_report.orphans_adopted = adopt_report.orphans_adopted
         reconcile_report.orphans_unmatched = adopt_report.orphans_unmatched
@@ -537,6 +538,10 @@ def sync_playlist(playlist_id: int, *, json_mode: bool = False) -> SyncReport:
 
     results: list[ProcessResult] = list(reconcile_report.results)
     seen_track_ids: set[int] = set()
+    # Keep freshly adopted local files from being marked removed this run.
+    for result in reconcile_report.results:
+        if result.status == "adopted" and result.track_id is not None:
+            seen_track_ids.add(result.track_id)
     total_items_seen = 0
     batch_number = 0
 
@@ -596,6 +601,20 @@ def sync_playlist(playlist_id: int, *, json_mode: bool = False) -> SyncReport:
 
     if not _is_exportify_playlist(playlist):
         removed = previously_active - seen_track_ids
+        # Local-only adoptees (no Spotify/YouTube id) stay on the playlist
+        # even though they are absent from the remote catalog.
+        if removed:
+            from tracks import get_track_identity
+
+            local_only: set[int] = set()
+            for track_id in removed:
+                try:
+                    identity = get_track_identity(track_id)
+                except LookupError:
+                    continue
+                if not identity.spotify_track_id and not identity.youtube_video_id:
+                    local_only.add(track_id)
+            removed -= local_only
         if removed:
             now = _utc_now()
             conn.executemany(

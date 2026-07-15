@@ -938,8 +938,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = subparsers.add_parser(
         "set-adopt-orphans",
         help=(
-            "When on, sync tries to link orphan audio files in playlist folders "
-            "to tracked playlist songs using file metadata."
+            "When on, sync adopts orphan audio files in playlist folders "
+            "(files on disk that are not in the database) into the playlist."
         ),
     )
     p.add_argument("adopt", choices=["on", "off"])
